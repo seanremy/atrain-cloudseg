@@ -169,8 +169,8 @@ class ExpandingArm3(nn.Module):
         self.bn3 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x, y):
-        x = self.conv1(x)
-        x = torch.cat([x, y], dim=3)
+        x_t = self.conv1(x)
+        x = torch.cat([x_t, y], dim=3)
         x = self.conv2(x)
         x = F.relu(self.bn1(x))
         x = self.conv3(x)
