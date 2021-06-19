@@ -17,7 +17,7 @@ class CloudNet(nn.Module):
     """
 
     def __init__(self, input_dims: Tuple(int, int), num_channels=4, num_classes=1):
-        super(CloudNet, self).__init__()
+        super().__init__()
         self.conv0 = nn.Conv2d(num_channels, 16, kernel_size=3)
         self.conv1 = ContractingArm(16, 32)
         self.conv2 = ContractingArm(32, 64)
@@ -63,7 +63,7 @@ class ContractingArm(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int, dropout: bool = False):
-        super(ContractingArm, self).__init__()
+        super().__init__()
         self.dropout = dropout
         # branch A
         self.conv_a = nn.Conv2d(in_channels, out_channels // 2, kernel_size=1, padding="same")
@@ -97,7 +97,7 @@ class ContractingArm3(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int):
-        super(ContractingArm3, self).__init__()
+        super().__init__()
         # branch A
         self.conv_a = nn.Conv2d(in_channels, out_channels // 2, kernel_size=1, padding="same")
         self.bn_a = nn.BatchNorm2d(out_channels // 2)
@@ -137,7 +137,7 @@ class ExpandingArm(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int):
-        super(ExpandingArm, self).__init__()
+        super().__init__()
         self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2, padding="same")
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
         self.bn1 = nn.BatchNorm2d(out_channels)
@@ -160,7 +160,7 @@ class ExpandingArm3(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int):
-        super(ExpandingArm, self).__init__()
+        super().__init__()
         self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2, padding="same")
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
         self.bn1 = nn.BatchNorm2d(out_channels)
