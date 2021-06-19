@@ -13,10 +13,16 @@ from torch.nn import functional as F
 class CloudNet(nn.Module):
     """The main module for Cloud-Net. Similar to a U-Net, with two main differences:
     1) The shortcut connections use all previous layer features (stacked channel-wise)
-    2
+    2) The convolutional blocks are different.
     """
 
-    def __init__(self, input_dims: Tuple(int, int), num_channels=4, num_classes=1):
+    def __init__(self, num_channels: int = 4, num_classes: int = 1):
+        """Create a CloudNet.
+
+        Args:
+            num_channels: Number of channels in the input.
+            num_classes: Number of classes (channels) in the output.
+        """
         super().__init__()
         self.conv0 = nn.Conv2d(num_channels, 16, kernel_size=3)
         self.conv1 = ContractingArm(16, 32)
@@ -63,6 +69,13 @@ class ContractingArm(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int, dropout: bool = False):
+        """Create a ContractingArm.
+
+        Args:
+            in_channels: The number of channels in the input.
+            out_channels: The number of channels in the output.
+            dropout: True to include the dropout layer, defaults to False.
+        """
         super().__init__()
         self.dropout = dropout
         # branch A
@@ -97,6 +110,12 @@ class ContractingArm3(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int):
+        """Create a ContractingArm3.
+
+        Args:
+            in_channels: The number of channels in the input.
+            out_channels: The number of channels in the output.
+        """
         super().__init__()
         # branch A
         self.conv_a = nn.Conv2d(in_channels, out_channels // 2, kernel_size=1, padding="same")
@@ -137,6 +156,13 @@ class ExpandingArm(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int):
+        """
+        Create an ExpandingArm.
+
+        Args:
+            in_channels: The number of channels in the input.
+            out_channels: The number of channels in the output.
+        """
         super().__init__()
         self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2, padding="same")
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
@@ -160,6 +186,12 @@ class ExpandingArm3(nn.Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int):
+        """Create an ExpandingArm3.
+
+        Args:
+            in_channels: The number of channels in the input.
+            out_channels: The number of channels in the output.
+        """
         super().__init__()
         self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2, padding="same")
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
