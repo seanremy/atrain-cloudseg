@@ -132,7 +132,8 @@ class ContractingArm3(nn.Module):
 
 class ExpandingArm(nn.Module):
     """Conv transpose block.
-    Concatenates
+    Concatenates y with the conv transpose features of x, then passes that through two 3x3 conv layers, adding the
+    (skip) conv transpose features again at the end.
     """
 
     def __init__(self, in_channels: int, out_channels: int):
