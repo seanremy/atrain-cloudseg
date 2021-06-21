@@ -11,6 +11,7 @@ link in the data/ folder, as explained in README.md.
 
 import os
 import shutil
+import sys
 
 import numpy as np
 from PIL import Image
@@ -53,13 +54,15 @@ def main():
 
         # read the patch list
         patch_names = np.array(open(os.path.join(subset_path, patch_filename)).read().split("\n")[1:-1])
+        nonempty_patches = []
+
+        in95 = "additional" in subset_dir  # if this is 95-Cloud or 38-Cloud
 
         # load each image and save it to .npy
-        print(f"{subset_dir} patch list loaded, pre-processing:")
-        for patch_name in tqdm(patch_names):
+        print(f"{subset_dir} | patch list loaded, pre-processing images.", end="\n\n")
+        for patch_name in tqdm(patch_names, file=sys.stdout):
             # read and stack the 4 .TIF files into one numpy array
             channel_arrs = []
-            in95 = "additional" in subset_dir
             for channel in ["nir", "red", "green", "blue"]:
                 if in95:
                     channel_path = os.path.join(
@@ -69,17 +72,20 @@ def main():
                     channel_path = os.path.join(subset_path, f"{split}_{channel}", f"{channel}_{patch_name}.TIF")
                 channel_arrs.append(np.array(Image.open(channel_path)))
             patch_arr = np.stack(channel_arrs, axis=2)
-            # save it
-            np.save(
-                open(
-                    os.path.join(
-                        npy_path,
-                        f"{patch_name}.npy",
-                    ),
-                    "wb",
-                ),
-                patch_arr,
-            )
+            # if the image isn't empty, save it and add it to the non-empty patches
+            if not (patch_arr == 0).all():
+                np.save(open(os.path.join(npy_path, f"{patch_name}.npy"), "wb"), patch_arr)
+                nonempty_patches.append(patch_name)
+        # write a file of the non-empty patches
+        open(os.path.join(subset_path, "nonempty_patches.csv"), "w").write("\n".join(nonempty_patches))
+        # if this is a training set, then also save the GT as numpy arrays
+        if split == "train":
+            print(f"{subset_dir} | pre-processing ground truth:", end="\n\n")
+            gt_dir = "train_gt_additional_to38cloud" if in95 else "train_gt"
+            gt_path = os.path.join(subset_path, gt_dir)
+            for patch_name in tqdm(nonempty_patches, file=sys.stdout):
+                gt_arr = np.array(Image.open(os.path.join(gt_path, f"gt_{patch_name}.TIF")))
+                np.save(open(os.path.join(npy_path, f"gt_{patch_name}.npy"), "wb"), gt_arr)
         print("\n")
 
     print("Done pre-processing the 95-Cloud dataset! Enjoy!")
