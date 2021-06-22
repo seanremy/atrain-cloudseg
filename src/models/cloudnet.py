@@ -3,7 +3,7 @@
 Code adapted from https://github.com/SorourMo/Cloud-Net-A-semantic-segmentation-CNN-for-cloud-detection
 Some parts of their implementation are borrowed from https://www.kaggle.com/cjansen/u-net-in-keras
 """
-from typing import List, Tuple
+from typing import List
 
 import torch
 from torch import nn
@@ -24,19 +24,19 @@ class CloudNet(nn.Module):
             num_classes: Number of classes (channels) in the output.
         """
         super().__init__()
-        self.conv0 = nn.Conv2d(num_channels, 16, kernel_size=3)
+        self.conv0 = nn.Conv2d(num_channels, 16, kernel_size=3, padding="same")
         self.conv1 = ContractingArm(16, 32)
         self.conv2 = ContractingArm(32, 64)
         self.conv3 = ContractingArm(64, 128)
         self.conv4 = ContractingArm(128, 256)
-        self.conv5 = ContractingArm3(256, 512, kernel_size=3)
+        self.conv5 = ContractingArm3(256, 512)
         self.conv6 = ContractingArm(512, 1024, dropout=True)
         self.conv7 = ExpandingArm3(1024, 512)
         self.conv8 = ExpandingArm(512, 256)
         self.conv9 = ExpandingArm(256, 128)
         self.conv10 = ExpandingArm(128, 64)
         self.conv11 = ExpandingArm(64, 32)
-        self.conv12 = nn.Conv2D(32, num_classes, kernel_size=1)
+        self.conv12 = nn.Conv2d(32, num_classes, kernel_size=1)
 
     def forward(self, x):
         x = self.conv0(x)
@@ -54,10 +54,10 @@ class CloudNet(nn.Module):
         x = self.conv12(x)
         return x
 
-    def shortcut(x: List(torch.Tensor)):
+    def shortcut(self, x: List[torch.Tensor]):
         """Add together all of the previous layers' features (repeating to broadcast to same size), then max pool."""
         for i in range(1, len(x)):
-            x[i] = F.max_pool2d(x[i].repeat(1, 1, 1, 2 ** i), kernel_size=2 ** i)
+            x[i] = F.max_pool2d(x[i].repeat(1, 2 ** i, 1, 1), kernel_size=2 ** i)
         return F.relu(sum(x))
 
 
@@ -91,11 +91,11 @@ class ContractingArm(nn.Module):
         # branch A
         x_a = self.conv_a(x)
         x_a = F.relu(self.bn_a(x_a))
-        x_a = torch.cat([x, x_a], dim=3)
+        x_a = torch.cat([x, x_a], dim=1)
         # branch B
         x_b = self.conv_b1(x)
         x_b = F.relu(self.bn_b1(x_b))
-        x_b = self.conv_b2(x)
+        x_b = self.conv_b2(x_b)
         if self.dropout:
             x_b = F.dropout(x_b, p=0.15)
         x_b = F.relu(self.bn_b2(x_b))
@@ -122,9 +122,9 @@ class ContractingArm3(nn.Module):
         self.bn_a = nn.BatchNorm2d(out_channels // 2)
         # branch B
         self.conv_b1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding="same")
-        self.bn_b3 = nn.BatchNorm2d(out_channels)
+        self.bn_b1 = nn.BatchNorm2d(out_channels)
         self.conv_b2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
-        self.bn_b3 = nn.BatchNorm2d(out_channels)
+        self.bn_b2 = nn.BatchNorm2d(out_channels)
         self.conv_b3 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
         self.bn_b3 = nn.BatchNorm2d(out_channels)
         # branch C
@@ -135,7 +135,7 @@ class ContractingArm3(nn.Module):
         # branch A
         x_a = self.conv_a(x)
         x_a = F.relu(self.bn_a(x_a))
-        x_a = torch.cat([x, x_a], dim=3)
+        x_a = torch.cat([x, x_a], dim=1)
         # branches B & C
         x_b = self.conv_b1(x)
         x_b = F.relu(self.bn_b1(x_b))
@@ -164,15 +164,15 @@ class ExpandingArm(nn.Module):
             out_channels: The number of channels in the output.
         """
         super().__init__()
-        self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2, padding="same")
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
+        self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.conv2 = nn.Conv2d(out_channels * 2, out_channels, kernel_size=3, padding="same")
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.conv3 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
         self.bn2 = nn.BatchNorm2d(out_channels)
 
     def forward(self, x, y):
         x_t = self.conv1(x)
-        x = torch.cat([x_t, y], dim=3)
+        x = torch.cat([x_t, y], dim=1)
         x = self.conv2(x)
         x = F.relu(self.bn1(x))
         x = self.conv3(x)
@@ -193,8 +193,8 @@ class ExpandingArm3(nn.Module):
             out_channels: The number of channels in the output.
         """
         super().__init__()
-        self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2, padding="same")
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
+        self.conv1 = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.conv2 = nn.Conv2d(out_channels * 2, out_channels, kernel_size=3, padding="same")
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.conv3 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
         self.bn2 = nn.BatchNorm2d(out_channels)
@@ -203,7 +203,7 @@ class ExpandingArm3(nn.Module):
 
     def forward(self, x, y):
         x_t = self.conv1(x)
-        x = torch.cat([x_t, y], dim=3)
+        x = torch.cat([x_t, y], dim=1)
         x = self.conv2(x)
         x = F.relu(self.bn1(x))
         x = self.conv3(x)
