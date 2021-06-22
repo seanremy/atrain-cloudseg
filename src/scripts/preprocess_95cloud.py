@@ -59,7 +59,7 @@ def main():
         in95 = "additional" in subset_dir  # if this is 95-Cloud or 38-Cloud
 
         # load each image and save it to .npy
-        print(f"{subset_dir} | patch list loaded, pre-processing images.", end="\n\n")
+        print(f"{subset_dir} | patch list loaded, pre-processing images.")
         for patch_name in tqdm(patch_names, file=sys.stdout):
             # read and stack the 4 .TIF files into one numpy array
             channel_arrs = []
@@ -80,7 +80,7 @@ def main():
         open(os.path.join(subset_path, "nonempty_patches.csv"), "w").write("\n".join(nonempty_patches))
         # if this is a training set, then also save the GT as numpy arrays
         if split == "train":
-            print(f"{subset_dir} | pre-processing ground truth:", end="\n\n")
+            print(f"{subset_dir} | pre-processing ground truth:")
             gt_dir = "train_gt_additional_to38cloud" if in95 else "train_gt"
             gt_path = os.path.join(subset_path, gt_dir)
             for patch_name in tqdm(nonempty_patches, file=sys.stdout):
