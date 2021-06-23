@@ -54,7 +54,7 @@ def main():
 
         # read the patch list
         patch_names = np.array(open(os.path.join(subset_path, patch_filename)).read().split("\n")[1:-1])
-        nonempty_patches = []
+        nonempty_patches = ["name"]
 
         in95 = "additional" in subset_dir  # if this is 95-Cloud or 38-Cloud
 
@@ -76,6 +76,7 @@ def main():
             if not (patch_arr == 0).all():
                 np.save(open(os.path.join(npy_path, f"{patch_name}.npy"), "wb"), patch_arr)
                 nonempty_patches.append(patch_name)
+            nonempty_patches.append("")
         # write a file of the non-empty patches
         open(os.path.join(subset_path, "nonempty_patches.csv"), "w").write("\n".join(nonempty_patches))
         # if this is a training set, then also save the GT as numpy arrays

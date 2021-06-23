@@ -15,19 +15,22 @@ from torch.utils.data import Dataset
 
 
 class Cloud38(Dataset):
-    """The 38-Cloud dataset has 5587 non-empty training patches and 6205 testing patches"""
+    """The 38-Cloud dataset has 5587 non-empty training patches, 5155 of which are at least 20% non-empty, and 6205
+    testing patches."""
 
-    def __init__(self, subset: str):
+    def __init__(self, subset: str, ignore_mostly_empty: bool = True):
         """Create a Cloud38 dataset.
 
         Args:
             subset: Either 'train' or 'test'.
+            ignore_mostly_empty: Whether to skip patches that are more than 80% empty.
         """
         super().__init__()
         # fixed values
         self.dataset_root = os.path.join(f"{os.path.dirname(__file__)}", "..", "..", "data", "95cloud")
         # params
         self.subset = subset
+        self.ignore_mostly_empty = ignore_mostly_empty
         # set all of the paths correctly based on train/test
         if self.subset == "train":
             self.subdir = "38-Cloud_training"
@@ -49,12 +52,19 @@ class Cloud38(Dataset):
                 " Did you run the pre-processing script, as instructed in README.md?"
             )
         # read the file of non-empty patches
-        self.patches_filename = "nonempty_patches.csv"
+        if self.ignore_mostly_empty and self.subset == "train":
+            self.patches_filename = "../training_patches_38-cloud_nonempty.csv"
+        else:
+            self.patches_filename = "nonempty_patches.csv"
         self.patches_filepath = os.path.join(self.dataset_root, self.subdir, self.patches_filename)
-        self.patches = open(self.patches_filepath).read().split("\n")
+        self.patches = open(self.patches_filepath).read().split("\n")[1:-1]
         self.num_patches = len(self.patches)
         # warn the user if the number of patches is different than what we expect
-        expected_num_patches = 5587 if self.subset == "train" else 6205
+        if self.subset == "train":
+            expected_num_patches = 5155 if self.ignore_mostly_empty else 5587
+        else:
+            expected_num_patches = 6205
+
         if self.num_patches != expected_num_patches:
             warnings.warn(
                 f"Expected to find {expected_num_patches} patches in '{self.patches_filepath}', but found "
@@ -79,28 +89,33 @@ class Cloud38(Dataset):
 
 
 class Cloud95(Cloud38):
-    """The 95-Cloud dataset adds 26301 more training patches to 38-Cloud."""
+    """The 95-Cloud dataset adds 17700 more non-empty training patches to 38-Cloud. Of those, 16347 have at least 20%
+    non-empty pixels."""
 
-    def __init__(self, subset: str):
+    def __init__(self, subset: str, ignore_mostly_empty: bool = True):
         """Create a Cloud95 dataset.
 
         Args:
             subset: Either 'train' or 'test'.
+            ignore_mostly_empty: Whether to skip patches that are more than 80% empty.
         """
-        super().__init__(subset)
+        super().__init__(subset, ignore_mostly_empty)
         # if this is a test set, no additional steps needed
         if subset == "test":
             return
         # add the additional cloud95 files
         self.subdir_95 = "95-cloud_training_only_additional_to38-cloud"
         self.npy_path_95 = os.path.join(self.dataset_root, self.subdir_95, f"train_npy")
+        if self.ignore_mostly_empty:
+            self.patches_filename = "training_patches_95-cloud_nonempty.csv"
         self.patches_filepath_95 = os.path.join(self.dataset_root, self.subdir_95, self.patches_filename)
         self.patches_95 = open(self.patches_filepath_95).read().split("\n")[1:-1]
+        self.patches_95 = [p for p in self.patches_95 if p not in set(self.patches)]  # remove the 38cloud patches
         self.num_patches_38 = self.num_patches
         self.num_patches += len(self.patches_95)
 
         # warn the user if the number of patches is different than what we expect
-        expected_num_patches_95 = 26301
+        expected_num_patches_95 = 16347 if self.ignore_mostly_empty else 17700
         if len(self.patches_95) != expected_num_patches_95:
             warnings.warn(
                 f"Expected to find {expected_num_patches_95} patches in '{self.patches_filepath_95}', but found "
