@@ -39,7 +39,9 @@ def polder_grid_to_latlon(lin: np.array, col: np.array, rounding: bool = False) 
     if rounding:
         n_i = np.round(n_i)
     lon = (180 / n_i) * (col - 3240.5)
-    lon[np.abs(lon) > 180.0] = -np.Inf  # set invalid longitudes to -infinity
+    lt180, gt180 = lon < -180, lon > 180
+    lon[lt180] = lon[lt180] + 360
+    lon[gt180] = lon[gt180] - 360
     return lat, lon
 
 
@@ -65,7 +67,7 @@ def latlon_to_polder_grid(lat: np.array, lon: np.array, rounding: bool = False) 
     n_i = 3240 * np.sin((np.pi / 180) * (lin - 0.5) / 18)
     if rounding:
         n_i = np.round(n_i)
-    col = 3240.5 + (n_i / 180) * lon
+    col = 3239.5 + (n_i / 180) * lon
     if rounding:
         col = np.round(col)
     return lin, col
@@ -137,6 +139,10 @@ def reproject_polder_griddata(
     Returns:
         reproj: The reprojected data
     """
+    assert ((0 <= old_row) * (old_row < 3240)).all()
+    assert ((0 <= old_col) * (old_col < 6480)).all()
+    assert ((0 <= new_row) * (new_row < 3240)).all()
+    assert ((0 <= new_col) * (new_col < 6480)).all()
     reproj = np.zeros_like(griddata) + fill_value
     reproj[new_row, new_col] = griddata[old_row, old_col]
     return reproj
@@ -154,7 +160,7 @@ def get_view_validity_from_scene(scene: h5py._hl.files.File, min_views: int, pat
     num_views = scene_field_to_numpy_arr(scene["Data_Fields"]["Nviews"])
     enough_views = num_views >= min_views
     valid_row, valid_col = np.where(enough_views)
-    valid_row_, valid_col_, theta = center_polder_grid(valid_row, valid_col)
+    valid_row_, valid_col_, _ = center_polder_grid(valid_row, valid_col)
     enough_views_centered = reproject_polder_griddata(enough_views, valid_row, valid_col, valid_row_, valid_col_)
     validity_mask = get_fitting_box_centers(enough_views_centered, patch_size)
     return validity_mask
