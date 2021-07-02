@@ -19,7 +19,7 @@ def scene_field_to_numpy_arr(h5_dataset: h5py._hl.dataset.Dataset, new_fill_valu
     return arr
 
 
-def polder_grid_to_latlon(lin: np.array, col: np.array, rounding: bool = False) -> tuple(np.ndarray, np.ndarray):
+def polder_grid_to_latlon(lin: np.array, col: np.array, rounding: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """TO DO: DOCUMENT AND UNIT TEST. See Appendix B here:
     web-backend.icare.univ-lille.fr//projects_data/parasol/docs/Parasol_Level-1_format_latest.pdf
 
@@ -43,7 +43,7 @@ def polder_grid_to_latlon(lin: np.array, col: np.array, rounding: bool = False) 
     return lat, lon
 
 
-def latlon_to_polder_grid(lat: np.array, lon: np.array, rounding: bool = False) -> tuple(np.ndarray, np.ndarray):
+def latlon_to_polder_grid(lat: np.array, lon: np.array, rounding: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """TO DO: DOCUMENT AND UNIT TEST. See Appendix B here:
     web-backend.icare.univ-lille.fr//projects_data/parasol/docs/Parasol_Level-1_format_latest.pdf
 
