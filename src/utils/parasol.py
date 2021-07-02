@@ -32,8 +32,6 @@ def polder_grid_to_latlon(lin: np.array, col: np.array, rounding: bool = False) 
         lat: Latitude
         lon: Longitude
     """
-    print(np.min(lin), np.max(lin))
-    print(np.min(col), np.max(col))
     assert ((0 <= lin) * (lin < 3240)).all()
     assert ((0 <= col) * (col < 6480)).all()
     lat = 90 - (lin - 0.5) / 18
@@ -58,8 +56,9 @@ def latlon_to_polder_grid(lat: np.array, lon: np.array, rounding: bool = False) 
         lin: Row in the POLDER grid, 1 <= lin <= 3240
         col: Column in the POLDER grid, 1 <= col <= 6480
     """
-    assert ((-180 <= lat) * (lat <= 180)).all()
-    assert ((-180 <= lon) * (lon <= 180)).all()
+    non_nan_lat, non_nan_lon = lat[~np.isnan(lat)], lon[~np.isnan(lon)]
+    assert ((-180 <= non_nan_lat) * (non_nan_lat <= 180)).all()
+    assert ((-180 <= non_nan_lon) * (non_nan_lon <= 180)).all()
     lin = 18 * (90 - lat) + 0.5
     if rounding:
         lin = np.round(lin)
@@ -138,7 +137,7 @@ def reproject_polder_griddata(
     Returns:
         reproj: The reprojected data
     """
-    reproj = np.zeros_like() + fill_value
+    reproj = np.zeros_like(griddata) + fill_value
     reproj[new_row, new_col] = griddata[old_row, old_col]
     return reproj
 
