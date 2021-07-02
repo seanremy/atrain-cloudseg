@@ -60,10 +60,16 @@ class ICARESession:
     def login(self) -> None:
         """Log in to the ICARE FTP server, prompting user for credentials."""
         self.ftp = FTP("ftp.icare.univ-lille1.fr")
-        username = input("ICARE Username:")
-        password = getpass.getpass("ICARE Password:")
-        self.ftp.login(username, password)
-        self.ftp.cwd("SPACEBORNE")
+        logged_in = False
+        while not logged_in:
+            try:
+                username = input("ICARE Username:")
+                password = getpass.getpass("ICARE Password:")
+                self.ftp.login(username, password)
+                logged_in = True
+                self.ftp.cwd("SPACEBORNE")
+            except error_perm as e:
+                print(e)
 
     def cleanup(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
