@@ -32,8 +32,10 @@ def polder_grid_to_latlon(lin: np.array, col: np.array, rounding: bool = False) 
         lat: Latitude
         lon: Longitude
     """
-    assert ((1 <= lin) * (lin <= 3240)).all()
-    assert ((1 <= col) * (col <= 6480)).all()
+    print(np.min(lin), np.max(lin))
+    print(np.min(col), np.max(col))
+    assert ((0 <= lin) * (lin < 3240)).all()
+    assert ((0 <= col) * (col < 6480)).all()
     lat = 90 - (lin - 0.5) / 18
     n_i = 3240 * np.cos(lat * np.pi / 180)
     if rounding:
