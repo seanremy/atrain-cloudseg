@@ -229,22 +229,7 @@ def main():
                 json.dump(instance_info, open(os.path.join(args.atrain_dir, "instance_info.json"), "w"))
 
                 # TO DO:
-                # log the output
-                # documentation
-                # push
                 # make script multi-thread
 
 
-import pdb
-import sys
-import traceback
-
-if __name__ == "__main__":
-    try:
-        main()
-    except:
-        extype, value, tb = sys.exc_info()
-        traceback.print_exc()
-        pdb.post_mortem(tb)
-
-# main()
+main()
