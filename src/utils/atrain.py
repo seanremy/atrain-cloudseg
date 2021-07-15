@@ -266,8 +266,8 @@ class PARASOLScene:
         self.filepath = filepath
         self.filename = os.path.split(self.filepath)[1]
         self.datetime = tai93_string_to_datetime(self.filename.split(".")[0].split("_")[2])
-        self.min_views = min_views
         self.fields = fields
+        self.min_views = min_views
 
         # read the hdf5 file
         self.h5 = h5py.File(self.filepath, "r")
@@ -434,7 +434,7 @@ class CLDCLASSScene:
         """
         nadir_mask = self.get_nadir_mask(par_scene).astype(int)
         row_filter = np.zeros((1, patch_size))
-        row_filter[padding:-padding] = 1
+        row_filter[:, padding:-padding] = 1
         rows_fit = convolve(nadir_mask, row_filter, mode="constant") >= 1
         col_filter = np.zeros((patch_size, 1)) + 1
         nadir_validity = convolve(rows_fit.astype(int), col_filter, mode="constant") >= patch_size
