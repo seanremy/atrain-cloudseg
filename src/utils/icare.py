@@ -12,6 +12,11 @@ import h5py
 from pyhdf.SD import SD, SDC
 
 
+def datetime_to_subpath(dt: datetime) -> str:
+    """Get the year/day folder ICARE subpath from a datetime."""
+    return os.path.join(str(dt.year), f"{dt.year}_{dt.month:02d}_{dt.day:02d}") + "/"
+
+
 class ICARESession:
     """ICARESession manages a session with the ICARE FTP server. Uses a cache to minimize requests.
 
@@ -24,17 +29,19 @@ class ICARESession:
         "PAR": "PARASOL/L1_B-HDF/",  # directory of PARASOL level 1B dataset
     }
 
-    def __init__(self, temp_dir: str) -> None:
+    def __init__(self, temp_dir: str, max_temp_files: int = 100) -> None:
         """Create an ICARESession.
 
         Args:
             temp_dir: Path to the temporary directory to use as a cache.
         """
-        self.login()
-        if not os.path.exists(temp_dir):
-            os.mkdir(temp_dir)
-        self.dir_tree = {}  # keep track of the directory tree of ICARE to cut down on FTP calls
         self.temp_dir = temp_dir
+        self.max_temp_files = max_temp_files
+        self.temp_files = []
+        self.login()
+        if not os.path.exists(self.temp_dir):
+            os.mkdir(self.temp_dir)
+        self.dir_tree = {}  # keep track of the directory tree of ICARE to cut down on FTP calls
 
     def __del__(self):
         self.cleanup()
@@ -63,8 +70,11 @@ class ICARESession:
         logged_in = False
         while not logged_in:
             try:
-                username = input("ICARE Username:")
-                password = getpass.getpass("ICARE Password:")
+                if os.path.exists("icare_credentials.txt"):
+                    username, password = open("icare_credentials.txt").read().split("\n")
+                else:
+                    username = input("ICARE Username:")
+                    password = getpass.getpass("ICARE Password:")
                 self.ftp.login(username, password)
                 logged_in = True
                 self.ftp.cwd("SPACEBORNE")
@@ -73,8 +83,8 @@ class ICARESession:
 
     def cleanup(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-        while os.path.exists(self.temp_dir):
-            time.sleep(0.1)
+        # while os.path.exists(self.temp_dir):
+        #     time.sleep(0.1)
 
     def listdir(self, dir_path: str) -> list:
         """List the contents of a directory, with a cache.
@@ -90,9 +100,13 @@ class ICARESession:
         if listing == {}:
             try:
                 nlst = self.ftp.nlst(dir_path)
-            except error_temp:
-                self.login()
-                nlst = self.ftp.nlst(dir_path)
+            except error_temp as e:
+                err_code = str(e)[:3]
+                if err_code in ["421", "430", "434"]:
+                    self.login()
+                    nlst = self.ftp.nlst(dir_path)
+                else:
+                    raise FileNotFoundError(f"Could not find {dir_path} in ICARE server.")
             listing = sorted([f.split("/")[-1] for f in nlst])
             listing_dict = {}
             for l in listing:
@@ -104,49 +118,30 @@ class ICARESession:
             self.dir_tree = self._set_rec(self.dir_tree, split_path, listing_dict)
         return listing
 
-    def read_file(self, filepath: str) -> None:
+    def get_file(self, filepath: str) -> str:
         # if the file doesn't exist, download it
-        if not os.path.exists(os.path.join(self.temp_dir, filepath)):
+        local_path = os.path.join(self.temp_dir, filepath)
+        if not os.path.exists(local_path):
+            # if we already have too many temp_files, delete the first one
+            if len(self.temp_files) == self.max_temp_files:
+                os.remove(self.temp_files[0])
+                self.temp_files = self.temp_files[1:]
+            self.temp_files.append(local_path)
+            # recursively make directories to this file
             os.makedirs(os.path.join(self.temp_dir, os.path.split(filepath)[0]), exist_ok=True)
-            temp_file = open(os.path.join(self.temp_dir, filepath), "wb")
+            temp_file = open(local_path, "wb")
             try:
                 self.ftp.retrbinary("RETR " + filepath, temp_file.write)
             except error_perm:
                 temp_file.close()
+                self.temp_files = self.temp_files[:-1]
                 raise FileNotFoundError(f"Could not find {filepath} in ICARE server.")
-            except error_temp:
-                self.login()
-                self.ftp.retrbinary("RETR " + filepath, temp_file.write)
+            except error_temp as e:
+                err_code = str(e)[:3]
+                if err_code in ["421", "430", "434"]:
+                    self.login()
+                    self.ftp.retrbinary("RETR " + filepath, temp_file.write)
+                else:
+                    raise FileNotFoundError(f"Could not find {filepath} in ICARE server.")
             temp_file.close()
-        # load and return the file, if it's a recognized extension
-        if filepath.endswith(".h5"):
-            return h5py.File(os.path.join(self.temp_dir, filepath), "r")
-        if filepath.endswith(".hdf"):
-            return SD(os.path.join(self.temp_dir, filepath), SDC.READ)
-        else:
-            raise ValueError(f"File extension '{filepath.split('.')}' not understood")
-
-
-def datetime_to_subpath(dt: datetime) -> str:
-    """Get the year/day folder ICARE subpath from a datetime."""
-    return os.path.join(str(dt.year), f"{dt.year}_{dt.month:02d}_{dt.day:02d}") + "/"
-
-
-def polder_filepath_to_datetime(filepath: str) -> datetime:
-    """Get a datetime from the path to a POLDER file."""
-    filename = os.path.split(filepath)[1].split(".")[0]
-    return tai93_string_to_datetime(filename.split("_")[2])
-
-
-def tai93_string_to_datetime(tai_time: str) -> datetime:
-    """Get a datetime from a TAI93 string."""
-    ymd, hms = tai_time.split("T")
-    hms = hms.replace(":", "-")
-    year, month, day = ymd.split("-")
-    hour, minute, second = hms.split("-")
-    second = re.findall("\d+", second)[
-        0
-    ]  # for some reason there can be a ZD (zone descriptor? has no number though..?)
-    return datetime(
-        year=int(year), month=int(month), day=int(day), hour=int(hour), minute=int(minute), second=int(second)
-    )
+        return local_path
