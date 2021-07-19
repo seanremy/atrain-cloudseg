@@ -27,7 +27,7 @@ class Cloud38(Dataset):
         """
         super().__init__()
         # fixed values
-        self.dataset_root = os.path.join(f"{os.path.dirname(__file__)}", "..", "..", "data", "95cloud")
+        self.dataset_root = os.path.join(os.path.dirname(__file__), "..", "..", "data", "95cloud")
         # params
         self.subset = subset
         self.ignore_mostly_empty = ignore_mostly_empty
