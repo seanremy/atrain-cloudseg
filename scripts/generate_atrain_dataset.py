@@ -5,13 +5,13 @@ machine-learning-friendly dataset of time-synced, location-synced input-output p
 multi-angle polarimetric imagery from PARASOL/POLDER. Output consists of sparse CLDCLASS labels.
 """
 
-import argparse
 import json
 import os
-import pdb
 import pickle
 import sys
 import warnings
+from argparse import ArgumentParser, Namespace
+from collections import defaultdict
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -24,8 +24,13 @@ from utils.icare import ICARESession, datetime_to_subpath
 from utils.parasol_fields import FIELD_DICT
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
+def parse_args() -> Namespace:
+    """Parse and return command-line arguments.
+
+    Returns:
+        args: Command-line argument namespace
+    """
+    parser = ArgumentParser()
     parser.add_argument(
         "--atrain_dir", type=str, required=True, help="Path to the directory where you want to make the dataset."
     )
@@ -38,6 +43,18 @@ def parse_args():
         type=int,
         default=600,
         help="Maximum acceptable time offset (in seconds) between POLDER and CALIOP beginning of acquisition.",
+    )
+    parser.add_argument(
+        "--days_per_month",
+        type=int,
+        default=1000,
+        help="Number of days to process per month. Default is arbitrarily high at 1000.",
+    )
+    parser.add_argument(
+        "--files_per_day",
+        type=int,
+        default=1000,
+        help="Number of files to process per day. There are usually 14-15 files. Default is arbitrarily high at 1000.",
     )
     parser.add_argument(
         "--samples_per_file", type=int, default=4, help="Goal number of samples to take per orbit file."
@@ -62,7 +79,12 @@ def parse_args():
         help="Minimum number of angles that need to be available for every pixel in a patch for it to be considered "
         "valid. Raising this number may cause strange sampling artifacts, and lowering it may reduce data quality.",
     )
-    parser.add_argument("--field_scheme", type=str, default="default", help="Which scheme of PARASOL fields to use.")
+    parser.add_argument(
+        "--field_scheme",
+        type=str,
+        default="default",
+        help="Which scheme of PARASOL fields to use. Fields can be found in 'utils/parasol_fields.py'",
+    )
     args = parser.parse_args()
     assert args.time_match_threshold > 0
     if args.time_match_threshold < 300 or args.time_match_threshold > 1200:
@@ -70,6 +92,7 @@ def parse_args():
             f"Time match threshold of {args.time_match_threshold} falls outside of the typical range "
             "(300-1200). You may notice strange file-matching behavior as a result."
         )
+    assert args.files_per_day > 0
     assert args.samples_per_file > 0
     assert args.patch_size > 0
     if args.patch_size > 100:
@@ -83,7 +106,7 @@ def parse_args():
     return args
 
 
-def main():
+def main() -> None:
 
     args = parse_args()
 
@@ -97,48 +120,76 @@ def main():
     seed = np.random.randint(1e6)
     np.random.seed(seed)
 
+    # the intersection of the operational lifetimes of the relevant A-Train satellites starts on 06/15/2006...
+    start_date = datetime(year=2006, month=6, day=15)
+    # ...and ends on 10/10/2013
+    end_date = datetime(year=2013, month=10, day=10)
+    # this is the first file timestamp with valid data
+    start_datetime = datetime(year=2006, month=6, day=19, hour=14, minute=57, second=39)
+
     # if resuming, pick up where we left off
     if args.resume and not os.path.exists(os.path.join(args.atrain_dir, "instance_info.json")):
         args.resume = False
     if args.resume:
+        dataset_generation_info = json.load(open(os.path.join(args.atrain_dir, "dataset_generation_info.json")))
         instance_info = json.load(open(os.path.join(args.atrain_dir, "instance_info.json"), "r"))
         instance_info = {int(k): v for k, v in instance_info.items()}
         inst_id_ctr = max(list(instance_info.keys())) + 1
         last_datetime = datetime.strptime(instance_info[inst_id_ctr - 1]["cal_par_datetime"], "%Y-%m-%d %H:%M:%S")
         start_date = datetime(year=last_datetime.year, month=last_datetime.month, day=last_datetime.day)
+        date_list = [datetime.strptime(d, "%Y_%m_%d") for d in dataset_generation_info["date_list"]]
+        date_list = [d for d in date_list if d >= last_datetime]
     else:
         instance_info = {}
         inst_id_ctr = 0
+
+        # get which days we're going to use
+        day_idxs_per_yearmonth = defaultdict(list)
+        for day_idx in range((end_date - start_date).days + 1):
+            date = start_date + timedelta(days=day_idx)
+            day_idxs_per_yearmonth[f"{date.year}_{date.month}"].append(day_idx)
+        date_list = []
+        for yearmonth in day_idxs_per_yearmonth:
+            num_sample_days = min(len(day_idxs_per_yearmonth[yearmonth]), args.days_per_month)
+            day_idxs_from_month = np.random.choice(day_idxs_per_yearmonth[yearmonth], num_sample_days, replace=False)
+            date_list += [start_date + timedelta(days=int(day_idx)) for day_idx in day_idxs_from_month]
         dataset_generation_info = {
             "args": vars(args),
             "seed": seed,
             "par_fields": par_fields,
+            "date_list": [f"{d.year}_{d.month}_{d.day}" for d in date_list],
         }
         os.makedirs(args.atrain_dir, exist_ok=True)
         json.dump(dataset_generation_info, open(os.path.join(args.atrain_dir, "dataset_generation_info.json"), "w"))
-        # the intersection of the operational lifetimes of the relevant A-Train satellites starts on 06/15/2006...
-        start_date = datetime(year=2006, month=6, day=15)
-    # ...and ends on 10/10/2013
-    end_date = datetime(year=2013, month=10, day=10)
-    start_datetime = datetime(year=2006, month=6, day=15, hour=12, minute=4, second=34)
 
-    pbar = tqdm(range((end_date - start_date).days + 1), position=0, leave=True)
-    for day_idx in pbar:
-        date = start_date + timedelta(days=day_idx)
+    pbar = tqdm(date_list, position=0, leave=True)
+    for date in pbar:
         date_subpath = datetime_to_subpath(date)
 
         # Loop over files in this day
         date_sync_subdir = os.path.join(sync_subdir, date_subpath)
         try:
-            cal_par_filenames = sorted(icare_ses.listdir(date_sync_subdir))
+            cal_par_filenames = icare_ses.listdir(date_sync_subdir)
         except FileNotFoundError:
             print(f"No CALIPSO/PARASOL sync directory at: {date_sync_subdir}, continuing.")
             continue
-        for cal_par_filename in cal_par_filenames:
-            cal_par_datetime = tai93_string_to_datetime(cal_par_filename.split(".")[0].split("_")[3])
-            if cal_par_datetime < start_datetime or (args.resume and cal_par_datetime <= last_datetime):
-                continue
+        cal_par_datetimes = [tai93_string_to_datetime(fn.split(".")[0].split("_")[3]) for fn in cal_par_filenames]
 
+        # get indices of all files that fall within the valid datetime range
+        cal_par_sort_order = []
+        for i in range(len(cal_par_datetimes)):
+            if cal_par_datetimes[i] >= start_datetime and (not args.resume or cal_par_datetimes[i] > last_datetime):
+                cal_par_sort_order.append(i)
+        cal_par_sort_order = sorted(cal_par_sort_order, key=lambda idx: cal_par_datetimes[idx])
+
+        # take a subsample of these files
+        num_files_today = min(len(cal_par_sort_order), args.files_per_day)
+        cal_par_idxs = sorted(np.random.choice(len(cal_par_sort_order), num_files_today, replace=False))
+
+        # loop over the files we picked
+        for cp_idx in cal_par_idxs:
+            cal_par_filename = cal_par_filenames[cp_idx]
+            cal_par_datetime = cal_par_datetimes[cp_idx]
             pbar.set_description(f"Processing {cal_par_filename}")  # progress bar info
             cal_par_filepath = os.path.join(sync_subdir, date_subpath, cal_par_filename)
             local_cal_par_filepath = icare_ses.get_file(cal_par_filepath)
@@ -228,8 +279,8 @@ def main():
                 pickle.dump(patch_labels, open(os.path.join(args.atrain_dir, output_path), "wb"))
                 json.dump(instance_info, open(os.path.join(args.atrain_dir, "instance_info.json"), "w"))
 
-                # TO DO:
-                # make script multi-thread
+    icare_ses.cleanup()
 
 
-main()
+if __name__ == "__main__":
+    main()
