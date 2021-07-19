@@ -113,24 +113,6 @@ def _decode_cloud_scenario(cloud_scenario_arr: np.array) -> dict:
     return cloud_scenario
 
 
-# def _sum_pool2d(input: np.array, kernel_width: int, kernel_height: int) -> np.array:
-#     """Apply a summation convolution to the input (leveraging separability of the sum kernel).
-
-#     Args:
-#         input: The input to sum over
-#         kernel_width: Width of the sum kernel
-#         kernel_height: Height of the sum kernel
-
-#     Returns:
-#         sum_pool: The output of the summation convolution on the input
-#     """
-#     assert len(input.shape) == 2
-#     filter1 = np.zeros((1, kernel_width), dtype=int) + 1
-#     filter2 = np.zeros((kernel_height, 1), dtype=int) + 1
-#     sum_pool = convolve(convolve(input, filter1, mode="constant"), filter2, mode="constant")
-#     return sum_pool
-
-
 def _dataset_to_numpy(h5_dataset: h5py._hl.dataset.Dataset, crop: tuple = None) -> tuple[np.array, np.array]:
     """Convert a dataset from an hdf5 object with geospatial data into a numpy array.
 
