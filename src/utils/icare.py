@@ -29,7 +29,7 @@ class ICARESession:
         "PAR": "PARASOL/L1_B-HDF/",  # directory of PARASOL level 1B dataset
     }
 
-    def __init__(self, temp_dir: str, max_temp_files: int = 100) -> None:
+    def __init__(self, temp_dir: str, max_temp_files: int = 20) -> None:
         """Create an ICARESession.
 
         Args:
@@ -38,9 +38,11 @@ class ICARESession:
         self.temp_dir = temp_dir
         self.max_temp_files = max_temp_files
         self.temp_files = []
+        for dirpath, _, filenames in os.walk(self.temp_dir):
+            self.temp_files += [os.path.join(dirpath, f) for f in filenames]
         self.login()
         if not os.path.exists(self.temp_dir):
-            os.mkdir(self.temp_dir)
+            os.makedirs(self.temp_dir, exist_ok=True)
         self.dir_tree = {}  # keep track of the directory tree of ICARE to cut down on FTP calls
 
     def __del__(self):
@@ -64,11 +66,21 @@ class ICARESession:
         subdict[key_list[0]] = self._set_rec(subdict[key_list[0]], key_list[1:], val)
         return subdict
 
+    def _dump_temp_files(self) -> None:
+        """If we already have too many temp files, delete the first one."""
+        while len(self.temp_files) >= self.max_temp_files:
+            os.remove(self.temp_files[0])
+            self.temp_files = self.temp_files[1:]
+
     def login(self) -> None:
         """Log in to the ICARE FTP server, prompting user for credentials."""
         self.ftp = FTP("ftp.icare.univ-lille1.fr")
         logged_in = False
+        attempts = 0
         while not logged_in:
+            attempts += 1
+            if attempts > 10:
+                raise Exception("Too many failed login attempts!!")
             try:
                 if os.path.exists("icare_credentials.txt"):
                     username, password = open("icare_credentials.txt").read().split("\n")
@@ -98,15 +110,22 @@ class ICARESession:
         split_path = [s for s in dir_path.split("/") if s != ""]
         listing = self._get_rec(self.dir_tree, split_path)
         if listing == {}:
-            try:
-                nlst = self.ftp.nlst(dir_path)
-            except error_temp as e:
-                err_code = str(e)[:3]
-                if err_code in ["421", "430", "434"]:
-                    self.login()
+            err_code = None
+            attempts = 0
+            while err_code in [None, "421", "430", "434"]:
+                attempts += 1
+                if attempts > 10:
+                    raise Exception("Too many failed listdir attempts!!")
+                try:
                     nlst = self.ftp.nlst(dir_path)
-                else:
-                    raise FileNotFoundError(f"Could not find {dir_path} in ICARE server.")
+                    break
+                except error_temp as e:
+                    print(e)
+                    err_code = str(e)[:3]
+                    if err_code in ["421", "430", "434"]:
+                        self.login()
+                    else:
+                        raise FileNotFoundError(f"Could not find {dir_path} in ICARE server.")
             listing = sorted([f.split("/")[-1] for f in nlst])
             listing_dict = {}
             for l in listing:
@@ -122,26 +141,29 @@ class ICARESession:
         # if the file doesn't exist, download it
         local_path = os.path.join(self.temp_dir, filepath)
         if not os.path.exists(local_path):
-            # if we already have too many temp_files, delete the first one
-            if len(self.temp_files) == self.max_temp_files:
-                os.remove(self.temp_files[0])
-                self.temp_files = self.temp_files[1:]
+            self._dump_temp_files()
             self.temp_files.append(local_path)
             # recursively make directories to this file
             os.makedirs(os.path.join(self.temp_dir, os.path.split(filepath)[0]), exist_ok=True)
             temp_file = open(local_path, "wb")
-            try:
-                self.ftp.retrbinary("RETR " + filepath, temp_file.write)
-            except error_perm:
-                temp_file.close()
-                self.temp_files = self.temp_files[:-1]
-                raise FileNotFoundError(f"Could not find {filepath} in ICARE server.")
-            except error_temp as e:
-                err_code = str(e)[:3]
-                if err_code in ["421", "430", "434"]:
-                    self.login()
+            err_code = None
+            attempts = 0
+            while err_code in [None, "421", "430", "434"]:
+                attempts += 1
+                if attempts > 10:
+                    raise Exception("Too many get file attempts!!")
+                try:
                     self.ftp.retrbinary("RETR " + filepath, temp_file.write)
-                else:
-                    raise FileNotFoundError(f"Could not find {filepath} in ICARE server.")
+                    break
+                except error_temp as e:
+                    err_code = str(e)[:3]
+                    if err_code in ["421", "430", "434"]:
+                        self.login()
+                    else:
+                        raise FileNotFoundError(f"Could not find {filepath} in ICARE server.")
+                except error_perm as e:
+                    err_code = str(e)[:3]
+                    if err_code == "550":
+                        raise FileNotFoundError(f"Could not find {filepath} in ICARE server.")
             temp_file.close()
         return local_path
