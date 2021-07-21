@@ -18,7 +18,7 @@ class Cloud38(Dataset):
     """The 38-Cloud dataset has 5587 non-empty training patches, 5155 of which are at least 20% non-empty, and 6205
     testing patches."""
 
-    def __init__(self, subset: str, ignore_mostly_empty: bool = True):
+    def __init__(self, subset: str, ignore_mostly_empty: bool = True) -> None:
         """Create a Cloud38 dataset.
 
         Args:
@@ -71,11 +71,11 @@ class Cloud38(Dataset):
                 f"{self.num_patches} patches."
             )
 
-    def __len__(self):
+    def __len__(self) -> int:
         """Get the length of this dataset."""
         return self.num_patches
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> dict:
         """Get the item at the specified index."""
         patch_name = self.patches[idx]
         item = {
@@ -92,7 +92,7 @@ class Cloud95(Cloud38):
     """The 95-Cloud dataset adds 17700 more non-empty training patches to 38-Cloud. Of those, 16347 have at least 20%
     non-empty pixels."""
 
-    def __init__(self, subset: str, ignore_mostly_empty: bool = True):
+    def __init__(self, subset: str, ignore_mostly_empty: bool = True) -> None:
         """Create a Cloud95 dataset.
 
         Args:
@@ -122,7 +122,7 @@ class Cloud95(Cloud38):
                 f"{len(self.patches_95)} patches."
             )
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> dict:
         """Get the item at the specified index."""
         if idx < self.num_patches_38:
             return super().__getitem__(idx)
