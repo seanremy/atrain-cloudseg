@@ -87,8 +87,6 @@ class ATrain(Dataset):
         weight_x = 1 - np.abs(interp_corners[:, :, 1] - np.stack([idx_x] * 4, axis=1))
         interp_weights = np.expand_dims(weight_y * weight_x, axis=2)
 
-        # TO DO: handle out of bounds!!
-
         return interp_corners, interp_weights
 
     def __getitem__(self, idx: int) -> dict:
@@ -97,7 +95,7 @@ class ATrain(Dataset):
         inst = self.instance_info[inst_id]
         parasol_arr = np.load(os.path.join(self.dataset_root, inst["input_path"]))
         input_arr = parasol_arr[:, :, self.multi_angle_idx]
-        input_arr = np.clip(input_arr, 0, 1)
+        input_arr = np.transpose(np.clip(input_arr, 0, 1), (2, 0, 1))
         output_dict = pickle.load(open(os.path.join(self.dataset_root, inst["output_path"]), "rb"))
         assert inst_id == output_dict.pop("instance_id")
 
@@ -152,7 +150,7 @@ def collate_atrain(batch: list) -> dict:
         b_idx.append(torch.as_tensor([inst_idx], dtype=torch.long).repeat(inst["input"]["interp"]["corners"].shape[0]))
         interp_boxes.append(torch.as_tensor(inst["input"]["interp"]["corners"], dtype=torch.long))
         interp_weights.append(torch.as_tensor(inst["input"]["interp"]["weights"], dtype=torch.float))
-        cloud_scenario.append(torch.as_tensor(inst["output"]["cloud_scenario"], dtype=torch.float))
+        cloud_scenario.append(torch.as_tensor(inst["output"]["cloud_scenario"], dtype=torch.long))
     coll_batch = {
         "input": {
             "sensor_input": torch.stack(sensor_input, dim=0),
@@ -182,3 +180,36 @@ def collate_atrain(batch: list) -> dict:
         coll_batch["output"]["cloud_scenario_flags"] = {k: torch.cat(v, dim=0) for k, v in flags.items()}
 
     return coll_batch
+
+
+def interp_atrain_output(batch, out):
+    """TO DO"""
+    out = out.permute(0, 2, 3, 1)
+
+    batch_idx = batch["input"]["interp"]["batch_idx"]
+    corner_idx = batch["input"]["interp"]["corners"]
+    patch_shape = batch["input"]["sensor_input"].shape[2:4]
+
+    # handle out of bounds by simply shifting the offending indices back in bounds...
+    # ...this makes it effectively nearest-neighbor on that axis
+    corner_idx[corner_idx[:, :, 0] < 0] = 0  # too high
+    corner_idx[corner_idx[:, :, 0] > patch_shape[0]] = patch_shape[0] - 1  # too low
+    corner_idx[corner_idx[:, :, 1] < 0] = 0  # too far left
+    corner_idx[corner_idx[:, :, 1] > patch_shape[1]] = patch_shape[1] - 1  # too far right
+
+    corner_idx = corner_idx[:, :, 0] * patch_shape[0] + corner_idx[:, :, 1]
+    corner_idx = corner_idx.view(-1)
+
+    idx = batch_idx.repeat(4) * patch_shape[0] * patch_shape[0] + corner_idx
+    print(out.shape)
+    print(out.reshape(-1, out.shape[3]).shape)
+    print(out.type())
+    print(idx.shape)
+    print(idx.type())
+    out_corners = out.reshape(-1, out.shape[3])[idx]
+
+    weights = batch["input"]["interp"]["weights"].view(-1)
+    out_corners_weighted = weights.repeat(out_corners.shape[1], 1).T * out_corners
+    out_corners_weighted = out_corners.view(weights.shape[0] // 4, 4, out_corners.shape[1])
+    out_interp = torch.sum(out_corners_weighted, dim=1)
+    return out_interp
