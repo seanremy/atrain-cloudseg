@@ -141,14 +141,15 @@ def collate_atrain(batch: list) -> dict:
     coll_batch = {}
     sensor_input = []
     b_idx = []
-    interp_boxes = []
+    interp_corners = []
     interp_weights = []
     cloud_scenario = []
     for inst_idx in range(len(batch)):
         inst = batch[inst_idx]
         sensor_input.append(torch.as_tensor(inst["input"]["sensor_input"], dtype=torch.float))
         b_idx.append(torch.as_tensor([inst_idx], dtype=torch.long).repeat(inst["input"]["interp"]["corners"].shape[0]))
-        interp_boxes.append(torch.as_tensor(inst["input"]["interp"]["corners"], dtype=torch.long))
+        # Pre-compute interpolation corners and weights so that applying the interpolated loss is quick and easy
+        interp_corners.append(torch.as_tensor(inst["input"]["interp"]["corners"], dtype=torch.long))
         interp_weights.append(torch.as_tensor(inst["input"]["interp"]["weights"], dtype=torch.float))
         cloud_scenario.append(torch.as_tensor(inst["output"]["cloud_scenario"], dtype=torch.long))
     coll_batch = {
@@ -156,7 +157,7 @@ def collate_atrain(batch: list) -> dict:
             "sensor_input": torch.stack(sensor_input, dim=0),
             "interp": {
                 "batch_idx": torch.cat(b_idx, dim=0),
-                "corners": torch.cat(interp_boxes, dim=0),
+                "corners": torch.cat(interp_corners, dim=0),
                 "weights": torch.cat(interp_weights, dim=0),
             },
         },
@@ -182,8 +183,16 @@ def collate_atrain(batch: list) -> dict:
     return coll_batch
 
 
-def interp_atrain_output(batch, out):
-    """TO DO"""
+def interp_atrain_output(batch: dict, out: torch.Tensor) -> torch.Tensor:
+    """Interpolate output from a model to line up with the labels in a batch.
+
+    Args:
+        batch: A batch of instances from the A-Train dataset.
+        out: The output of a model (same spatial resolution as input) which gets interpolated at labeled locations.
+
+    Returns:
+        out_interp: The interpolated output.
+    """
     out = out.permute(0, 2, 3, 1)
 
     batch_idx = batch["input"]["interp"]["batch_idx"]
@@ -200,12 +209,7 @@ def interp_atrain_output(batch, out):
     corner_idx = corner_idx[:, :, 0] * patch_shape[0] + corner_idx[:, :, 1]
     corner_idx = corner_idx.view(-1)
 
-    idx = batch_idx.repeat(4) * patch_shape[0] * patch_shape[0] + corner_idx
-    print(out.shape)
-    print(out.reshape(-1, out.shape[3]).shape)
-    print(out.type())
-    print(idx.shape)
-    print(idx.type())
+    idx = batch_idx.repeat(4) * patch_shape[0] * patch_shape[1] + corner_idx
     out_corners = out.reshape(-1, out.shape[3])[idx]
 
     weights = batch["input"]["interp"]["weights"].view(-1)
