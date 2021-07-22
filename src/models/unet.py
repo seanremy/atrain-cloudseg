@@ -1,4 +1,4 @@
-"""TO DO
+"""A U-Net-like model, slightly modified to better work for the high number of channels in many satellite datasets.
 
 Based on: https://github.com/milesial/Pytorch-UNet/blob/master/unet/unet_parts.py
 """
@@ -10,10 +10,15 @@ import torch.nn.functional as F
 
 
 class Down(nn.Module):
-    """TO DO"""
+    """Downsampling block in a U-Net."""
 
-    def __init__(self, in_channels, out_channels):
-        """TO DO"""
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        """Create a Down block.
+
+        Args:
+            in_channels: Number of input channels.
+            out_channels: Number of output channels.
+        """
         super().__init__()
         self.mp = nn.MaxPool2d(2)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
@@ -33,10 +38,15 @@ class Down(nn.Module):
 
 
 class Up(nn.Module):
-    """TO DO"""
+    """Upsampling block in a U-Net."""
 
     def __init__(self, in_channels, out_channels):
-        """TO DO"""
+        """Create an Up block.
+
+        Args:
+            in_channels: Number of input channels.
+            out_channels: Number of output channels.
+        """
         super().__init__()
         self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
         self.conv1 = nn.Conv2d(in_channels, in_channels // 2, kernel_size=3, padding=1)
@@ -61,15 +71,24 @@ class Up(nn.Module):
 
 
 class UNet(nn.Module):
-    """TO DO"""
+    """A U-Net model, with a slight modification: there are 1x1 convolutions at the top and bottom of the network to
+    deal with the high number of channels in many satellite datasets.
+    """
 
-    def __init__(self, in_channels, out_channels, base_depth, patch_shape):
-        """TO DO"""
+    def __init__(self, in_channels: int, out_channels: int, base_depth: int, img_dims: tuple) -> None:
+        """Create a U-Net.
+
+        Args:
+            in_channels: The number of input channels.
+            out_channels: The number of output channels.
+            base_depth: The base convolutional filter depth, which increases by 2 at every Down block.
+            img_dims: The height and width of images input into this network.
+        """
         super().__init__()
         self.in_channels = in_channels
         self.base_depth = base_depth
-        self.patch_shape = patch_shape
-        self.num_layers = int(min(np.log(self.patch_shape[0]) / np.log(2), np.log(self.patch_shape[1]) / np.log(2)))
+        self.img_dims = img_dims
+        self.num_layers = int(min(np.log(self.img_dims[0]) / np.log(2), np.log(self.img_dims[1]) / np.log(2)))
         self.pre_conv_a = nn.Conv2d(self.in_channels, self.base_depth, kernel_size=1)
         self.pre_conv_b = nn.Conv2d(self.in_channels, self.base_depth // 2, kernel_size=1)
         self.down_blocks = []
