@@ -39,8 +39,11 @@ class ATrain(Dataset):
         self.mode = mode
         self.split = json.load(open(os.path.join(self.dataset_root, f"{split_name}.json")))
         self.instance_ids = list(self.split[self.mode])
+        # TO DO: remove
+        bad_instances = json.load(open(os.path.join(self.dataset_root, "bad_instances.json")))
+        self.instance_ids = [i for i in self.instance_ids if i not in bad_instances]
         # pre-compute length so we don't have to later; it won't change
-        self.len = len(self.split[self.mode])
+        self.len = len(self.instance_ids)
 
         # get index of just the multi-angle fields
         self.multi_angle_idx = []
@@ -202,9 +205,9 @@ def interp_atrain_output(batch: dict, out: torch.Tensor) -> torch.Tensor:
     # handle out of bounds by simply shifting the offending indices back in bounds...
     # ...this makes it effectively nearest-neighbor on that axis
     corner_idx[corner_idx[:, :, 0] < 0] = 0  # too high
-    corner_idx[corner_idx[:, :, 0] > patch_shape[0]] = patch_shape[0] - 1  # too low
+    corner_idx[corner_idx[:, :, 0] >= patch_shape[0]] = patch_shape[0] - 1  # too low
     corner_idx[corner_idx[:, :, 1] < 0] = 0  # too far left
-    corner_idx[corner_idx[:, :, 1] > patch_shape[1]] = patch_shape[1] - 1  # too far right
+    corner_idx[corner_idx[:, :, 1] >= patch_shape[1]] = patch_shape[1] - 1  # too far right
 
     corner_idx = corner_idx[:, :, 0] * patch_shape[0] + corner_idx[:, :, 1]
     corner_idx = corner_idx.view(-1)
