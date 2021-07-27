@@ -75,7 +75,9 @@ class UNet(nn.Module):
     deal with the high number of channels in many satellite datasets.
     """
 
-    def __init__(self, in_channels: int, out_channels: int, base_depth: int, img_dims: tuple) -> None:
+    def __init__(
+        self, in_channels: int, out_channels: int, base_depth: int, img_dims: tuple, num_layers: int = None
+    ) -> None:
         """Create a U-Net.
 
         Args:
@@ -83,12 +85,17 @@ class UNet(nn.Module):
             out_channels: The number of output channels.
             base_depth: The base convolutional filter depth, which increases by 2 at every Down block.
             img_dims: The height and width of images input into this network.
+            num_layers: The number of layers in this network. Defaults to the max number of layers possible.
         """
         super().__init__()
         self.in_channels = in_channels
         self.base_depth = base_depth
         self.img_dims = img_dims
-        self.num_layers = int(min(np.log(self.img_dims[0]) / np.log(2), np.log(self.img_dims[1]) / np.log(2)))
+        if num_layers is None:
+            # as many layers as can be fit with input at least 1x1
+            self.num_layers = int(np.log(min(self.img_dims)) / np.log(2))
+        else:
+            self.num_layers = num_layers
         self.pre_conv_a = nn.Conv2d(self.in_channels, self.base_depth, kernel_size=1)
         self.pre_conv_b = nn.Conv2d(self.in_channels, self.base_depth // 2, kernel_size=1)
         self.down_blocks = []
