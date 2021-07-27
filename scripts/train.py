@@ -3,6 +3,7 @@
 Some code borrowed from: https://github.com/erikwijmans/skynet-ddp-slurm-example
 """
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -11,17 +12,20 @@ from collections.abc import Mapping
 from contextlib import nullcontext
 
 import ifcfg
+import numpy as np
 import torch
 import torch.distributed as distrib
 import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 if "./src" not in sys.path:
     sys.path.insert(0, "./src")  # TO DO: change this once it's a package
 from datasets.atrain import ALL_METRICS, MASK_ONLY_METRICS, ATrain, collate_atrain, interp_atrain_output
 from models.unet import UNet
+from utils.plotting import get_cloud_mask_viz
 
 EXIT = threading.Event()
 EXIT.clear()
@@ -34,11 +38,11 @@ def parse_args() -> argparse.Namespace:
         args: Command-line argument namespace
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base_depth", type=int, default=64, help="Base depth for the U-Net model.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size to use for training and validation.")
+    parser.add_argument("--base-depth", type=int, default=64, help="Base depth for the U-Net model.")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size to use for training and validation.")
     parser.add_argument("--eval-frequency", type=int, default=1, help="How often (in epochs) to evaluate.")
     parser.add_argument("--exp-name", type=str, required=True, help="Name of the experiment.")
-    parser.add_argument("--learning-rate", type=float, default=1e-2, help="Starting learning rate.")
+    parser.add_argument("--learning-rate", type=float, default=1e-3, help="Starting learning rate.")
     parser.add_argument("--mask-only", action="store_true", help="Specify to only predict masks, and not cloud type.")
     parser.add_argument("--num-epochs", type=int, default=200, help="Number of epochs to run the experiment for.")
     args = parser.parse_args()
@@ -97,7 +101,7 @@ def dict_to(d, device):
     return d
 
 
-def run_epoch(mode, model, optimizer, dloader, scheduler, epoch, mask_only):
+def run_epoch(mode, model, optimizer, dloader, writer, scheduler, epoch, mask_only):
     """TO DO"""
     assert mode in ["train", "val"]
 
@@ -107,7 +111,10 @@ def run_epoch(mode, model, optimizer, dloader, scheduler, epoch, mask_only):
     stats = torch.zeros((3,), device=device)
     pbar = tqdm(dloader)
     predictions = {}
+    batch_idx = -1
+    viz_freq = 100
     for batch in pbar:
+        batch_idx += 1
         batch = dict_to(batch, device)
 
         x = batch["input"]["sensor_input"]
@@ -117,7 +124,7 @@ def run_epoch(mode, model, optimizer, dloader, scheduler, epoch, mask_only):
             out = model(x)
             out_interp = interp_atrain_output(batch, out)
             if mask_only:
-                out_sig = F.sigmoid(out_interp)
+                out_sig = torch.sigmoid(out_interp)
                 loss = F.binary_cross_entropy(out_sig.view(-1), (y > 0).float(), reduction="sum")
                 pred_classes = out_sig > 0.5
             else:
@@ -142,6 +149,18 @@ def run_epoch(mode, model, optimizer, dloader, scheduler, epoch, mask_only):
             f"{mode.capitalize()} Loss={loss / y.size(0):.3f}  |  Avg {mode.capitalize()} Loss={avg_loss:.3f}"
         )
 
+        writer.add_scalar(f"{mode} loss", loss / y.size(0), epoch * len(dloader) + batch_idx + 1)
+        if (batch_idx + 1) % viz_freq == 0:
+            batch_viz = []
+            for i in range(batch["instance_id"].shape[0]):
+                iid = batch["instance_id"][i]
+                gt_cloud_scenario = batch["output"]["cloud_scenario"][batch["input"]["interp"]["batch_idx"] == i]
+                viz = get_cloud_mask_viz(predictions[int(iid)], gt_cloud_scenario)
+                batch_viz.append(viz)
+            batch_viz = np.concatenate(batch_viz, axis=1)
+            viz_tag = f"cloud mask viz | epoch {epoch + 1} | {mode} batch {batch_idx + 1}"
+            writer.add_image(viz_tag, batch_viz, dataformats="HW")
+
         if EXIT.is_set():
             return
 
@@ -156,14 +175,18 @@ def run_epoch(mode, model, optimizer, dloader, scheduler, epoch, mask_only):
     return predictions, stats
 
 
-def checkpoint(args, model, optimizer, epoch, stats, val_metrics):
+def make_exp_dir(args):
     """TO DO"""
     exp_dir = os.path.join("experiments", args.exp_name)
     if not os.path.exists(exp_dir):
-        os.mkdir(exp_dir)
+        os.makedirs(exp_dir)
         json.dump(vars(args), open(os.path.join(exp_dir, "args.json"), "w"))
-    os.makedirs(exp_dir, exist_ok=True)
-    os.makedirs(os.path.join(exp_dir, "models"), exist_ok=True)
+        os.mkdir(os.path.join(exp_dir, "tensorboard"))
+
+
+def checkpoint(args, model, optimizer, epoch, stats, val_metrics):
+    """TO DO"""
+    exp_dir = os.path.join("experiments", args.exp_name)
     model_path = os.path.join(exp_dir, "models", f"epoch_{epoch+1}.pt")
     if hasattr(model, "module"):
         model = model.module
@@ -195,6 +218,8 @@ def main():
     # Have all workers wait
     distrib.barrier()
 
+    make_exp_dir(args)
+
     atrain_train = ATrain("train")
     atrain_val = ATrain("val")
     train_loader = DataLoader(
@@ -218,6 +243,11 @@ def main():
     )
     metric_list = MASK_ONLY_METRICS if args.mask_only else ALL_METRICS
 
+    now_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_dir = os.path.join("experiments", args.exp_name, "tensorboard", now_str)
+    os.makedirs(tensorboard_dir)
+    writer = SummaryWriter(tensorboard_dir)
+
     out_channels = 125 if args.mask_only else 125 * 9
     model = UNet(240, out_channels, args.base_depth, atrain_train[0]["input"]["sensor_input"].shape[1:])
     # Let's use group norm instead of batch norm because batch norm can be problematic if the batch size per GPU gets really small
@@ -234,14 +264,18 @@ def main():
 
     for epoch in range(args.num_epochs):
         tqdm.write(f"\n===== Epoch {epoch+1:3d} =====\n")
-        _, train_stats = run_epoch("train", model, optimizer, train_loader, scheduler, epoch, args.mask_only)
-        val_predictions, val_stats = run_epoch("val", model, optimizer, val_loader, scheduler, epoch, args.mask_only)
+        _, train_stats = run_epoch("train", model, optimizer, train_loader, writer, scheduler, epoch, args.mask_only)
+        val_predictions, val_stats = run_epoch(
+            "val", model, optimizer, val_loader, writer, scheduler, epoch, args.mask_only
+        )
         val_metrics = None
         if distrib.get_rank() == 0 and (epoch + 1) % args.eval_frequency == 0:
             val_metrics = atrain_val.evaluate(val_predictions, metric_list)
             tqdm.write("\nMetrics:")
             for m in val_metrics:
                 tqdm.write(f"{m[:min(len(m), 30)]}:\t{val_metrics[m]:.3f}")
+                if not np.isnan(val_metrics[m]):
+                    writer.add_scalar(m, val_metrics[m], (epoch + 1))
 
         train_loader.sampler.set_epoch(epoch)
 
