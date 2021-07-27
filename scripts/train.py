@@ -112,7 +112,7 @@ def run_epoch(mode, model, optimizer, dloader, writer, scheduler, epoch, mask_on
     pbar = tqdm(dloader)
     predictions = {}
     batch_idx = -1
-    viz_freq = 100
+    viz_freq = 50
     for batch in pbar:
         batch_idx += 1
         batch = dict_to(batch, device)
@@ -272,10 +272,11 @@ def main():
         if distrib.get_rank() == 0 and (epoch + 1) % args.eval_frequency == 0:
             val_metrics = atrain_val.evaluate(val_predictions, metric_list)
             tqdm.write("\nMetrics:")
-            for m in val_metrics:
-                tqdm.write(f"{m[:min(len(m), 30)]}:\t{val_metrics[m]:.3f}")
-                if not np.isnan(val_metrics[m]):
-                    writer.add_scalar(m, val_metrics[m], (epoch + 1))
+            for metric, instance_values in val_metrics.items():
+                overall_metric = np.mean(instance_values[~np.isnan(instance_values)])
+                tqdm.write(f"{metric[:min(len(metric), 30)]}:\t{overall_metric:.3f}")
+                if not np.isnan(overall_metric):
+                    writer.add_scalar(metric, overall_metric, (epoch + 1))
 
         train_loader.sampler.set_epoch(epoch)
 
