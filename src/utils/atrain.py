@@ -25,6 +25,21 @@ CLOUD_SCENARIO_INFO = {
 }
 
 
+def map_cloud_scenario_colors(cloud_scenario: np.array) -> np.array:
+    """Map an array of cloud scenario codes to RGB colors.
+
+    Args:
+        cloud_scenario: Array of cloud scenario codes, from 0 to 8.
+
+    Returns:
+        colors: Array of RGB colors.
+    """
+    colors = np.zeros((cloud_scenario.shape[0], cloud_scenario.shape[1], 3))
+    for scenario_num in CLOUD_SCENARIO_INFO:
+        colors[cloud_scenario == scenario_num] = CLOUD_SCENARIO_INFO[scenario_num]["color"]
+    return colors
+
+
 def polder_grid_to_latlon(lin: np.array, col: np.array, rounding: bool = False) -> tuple[np.array, np.array]:
     """Convert coordinates in the POLDER grid to latitude/longitude. See Appendix B here:
     web-backend.icare.univ-lille.fr//projects_data/parasol/docs/Parasol_Level-1_format_latest.pdf
