@@ -167,28 +167,27 @@ class ATrain(Dataset):
 
             h_bins_pred = np.array([_min(np.where(pred[i].cpu().detach().numpy())[0]) for i in range(pred.shape[0])])
             h_bins_gt = np.array([_min(np.where(gt_cloud_scenario[i])[0]) for i in range(gt_cloud_scenario.shape[0])])
+            import pdb
+
+            pdb.set_trace()
 
             if "cloud_mask_accuracy" in metrics:
                 # cloud mask accuracy := proportion of pixels correctly identified as cloud / not cloud
-                cloud_mask_acc = np.sum(gt_cloud_mask == pred_cloud_mask) / gt_cloud_mask.shape[0]
-                metrics["cloud_mask_accuracy"].append(cloud_mask_acc)
+                metrics["cloud_mask_accuracy"].append(np.mean(gt_cloud_mask == pred_cloud_mask.cpu().detach().numpy()))
 
             if "cloud_scenario_accuracy" in metrics:
                 # cloud scenario accuracy := proportion of pixel + height bin combinations whose cloud scenario is correctly identified
-                metrics["cloud_scenario_accuracy"].append(np.sum(gt_cloud_scenario == pred) / pred.size)
+                metrics["cloud_scenario_accuracy"].append(np.mean(gt_cloud_scenario == pred.cpu().detach().numpy()))
 
             if "cloudtop_height_bin_accuracy" in metrics:
                 # cloud-top height bin accuracy := proportion of pixels whose highest cloud is correctly identified
-                cth_bin_acc = np.sum(h_bins_pred == h_bins_gt) / h_bins_gt.shape[0]
-                metrics["cloudtop_height_bin_accuracy"].append(cth_bin_acc)
+                metrics["cloudtop_height_bin_accuracy"].append(np.mean(h_bins_pred == h_bins_gt))
 
             if "cloudtop_height_bin_offset_error" in metrics:
                 # cloud-top height bin offset := average distance between predicted and GT cloud-top height, only computed for points pixels where both prediction and GT have clouds
-                both_clouds = pred_cloud_mask * gt_cloud_mask
+                both_clouds = pred_cloud_mask.cpu().detach().numpy() * gt_cloud_mask
                 height_bin_offsets = np.abs(h_bins_pred[both_clouds] - h_bins_gt[both_clouds])
-                metrics["cloudtop_height_bin_offset_error"].append(
-                    np.sum(height_bin_offsets) / height_bin_offsets.shape[0]
-                )
+                metrics["cloudtop_height_bin_offset_error"].append(np.mean(height_bin_offsets))
         metrics["instance_ids"] = list(self.instance_info.keys())
         metrics = {k: np.array(v) for k, v in metrics.items()}
         return metrics
