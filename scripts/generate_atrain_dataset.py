@@ -5,12 +5,12 @@ machine-learning-friendly dataset of time-synced, location-synced input-output p
 multi-angle polarimetric imagery from PARASOL/POLDER. Output consists of sparse CLDCLASS labels.
 """
 
+import argparse
 import json
 import os
 import pickle
 import sys
 import warnings
-from argparse import ArgumentParser, Namespace
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -24,13 +24,13 @@ from utils.icare import ICARESession, datetime_to_subpath
 from utils.parasol_fields import FIELD_DICT
 
 
-def parse_args() -> Namespace:
+def parse_args() -> argparse.Namespace:
     """Parse and return command-line arguments.
 
     Returns:
         args: Command-line argument namespace
     """
-    parser = ArgumentParser()
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--atrain_dir", type=str, required=True, help="Path to the directory where you want to make the dataset."
     )
