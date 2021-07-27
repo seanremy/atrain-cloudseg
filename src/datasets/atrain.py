@@ -10,6 +10,14 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+ALL_METRICS = [
+    "cloud_mask_accuracy",
+    "cloud_scenario_accuracy",
+    "cloudtop_height_bin_accuracy",
+    "cloudtop_height_bin_offset_error",
+]
+MASK_ONLY_METRICS = ["cloud_mask_accuracy", "cloudtop_height_bin_accuracy", "cloudtop_height_bin_offset_error"]
+
 
 class ATrain(Dataset):
     """The A-Train Dataset."""
@@ -27,6 +35,8 @@ class ATrain(Dataset):
             get_flags: Get flags for the cloud scenario output. Defaults to False.
         """
         super().__init__()
+        self.mode = mode
+        self.split_name = split_name
         self.get_nondir = get_nondir
         self.get_flags = get_flags
 
@@ -36,8 +46,7 @@ class ATrain(Dataset):
         self.instance_info = json.load(open(os.path.join(self.dataset_root, "instance_info.json")))
         self.instance_info = {int(k): v for k, v in self.instance_info.items()}
         # load our split, get the instance ids
-        self.mode = mode
-        self.split = json.load(open(os.path.join(self.dataset_root, f"{split_name}.json")))
+        self.split = json.load(open(os.path.join(self.dataset_root, f"{self.split_name}.json")))
         self.instance_ids = list(self.split[self.mode])
         # TO DO: remove
         bad_instances = json.load(open(os.path.join(self.dataset_root, "bad_instances.json")))
@@ -109,6 +118,7 @@ class ATrain(Dataset):
         cloud_scenario = cloud_scenario_flags.pop("cloud_scenario")  # (p, 125)
 
         item = {
+            "instance_id": inst_id,
             "input": {
                 "sensor_input": input_arr,
                 "interp": {
@@ -131,6 +141,58 @@ class ATrain(Dataset):
 
         return item
 
+    def evaluate(self, predictions: dict, metrics: list[str] = ALL_METRICS) -> dict:
+        """TO DO"""
+        metrics = {m: [] for m in metrics}
+        for inst_id in self.instance_ids:
+            if inst_id not in predictions:
+                for m in metrics:
+                    metrics[m].append(0)
+
+            inst = self.instance_info[inst_id]
+            pred = predictions[inst_id]
+
+            gt_labels = pickle.load(open(os.path.join(self.dataset_root, inst["output_path"]), "rb"))
+            gt_cloud_scenario = gt_labels["cloud_scenario"]["cloud_scenario"]
+
+            assert gt_cloud_scenario.shape == pred.shape
+
+            gt_cloud_mask = (gt_cloud_scenario > 0).any(axis=1)
+            pred_cloud_mask = (pred > 0).any(axis=1)
+
+            def _min(a):
+                if a.shape[0] == 0:
+                    return -1
+                return np.min(a)
+
+            h_bins_pred = np.array([_min(np.where(pred[i].cpu().detach().numpy())[0]) for i in range(pred.shape[0])])
+            h_bins_gt = np.array([_min(np.where(gt_cloud_scenario[i])[0]) for i in range(gt_cloud_scenario.shape[0])])
+
+            if "cloud_mask_accuracy" in metrics:
+                # cloud mask accuracy := proportion of pixels correctly identified as cloud / not cloud
+                cloud_mask_acc = np.sum(gt_cloud_mask == pred_cloud_mask) / gt_cloud_mask.shape[0]
+                metrics["cloud_mask_accuracy"].append(cloud_mask_acc)
+
+            if "cloud_scenario_accuracy" in metrics:
+                # cloud scenario accuracy := proportion of pixel + height bin combinations whose cloud scenario is correctly identified
+                metrics["cloud_scenario_accuracy"].append(np.sum(gt_cloud_scenario == pred) / pred.size)
+
+            if "cloudtop_height_bin_accuracy" in metrics:
+                # cloud-top height bin accuracy := proportion of pixels whose highest cloud is correctly identified
+                cth_bin_acc = np.sum(h_bins_pred == h_bins_gt) / h_bins_gt.shape[0]
+                metrics["cloudtop_height_bin_accuracy"].append(cth_bin_acc)
+
+            if "cloudtop_height_bin_offset_error" in metrics:
+                # cloud-top height bin offset := average distance between predicted and GT cloud-top height, only computed for points pixels where both prediction and GT have clouds
+                both_clouds = pred_cloud_mask * gt_cloud_mask
+                height_bin_offsets = np.abs(h_bins_pred[both_clouds] - h_bins_gt[both_clouds])
+                metrics["cloudtop_height_bin_offset_error"].append(
+                    np.sum(height_bin_offsets) / height_bin_offsets.shape[0]
+                )
+        metrics["instance_ids"] = list(self.instance_info.keys())
+        metrics = {k: np.array(v) for k, v in metrics.items()}
+        return metrics
+
 
 def collate_atrain(batch: list) -> dict:
     """Collate a batch from the A-Train Dataset.
@@ -142,6 +204,7 @@ def collate_atrain(batch: list) -> dict:
         coll_batch: The collated batch.
     """
     coll_batch = {}
+    inst_ids = []
     sensor_input = []
     b_idx = []
     interp_corners = []
@@ -149,6 +212,7 @@ def collate_atrain(batch: list) -> dict:
     cloud_scenario = []
     for inst_idx in range(len(batch)):
         inst = batch[inst_idx]
+        inst_ids.append(inst["instance_id"])
         sensor_input.append(torch.as_tensor(inst["input"]["sensor_input"], dtype=torch.float))
         b_idx.append(torch.as_tensor([inst_idx], dtype=torch.long).repeat(inst["input"]["interp"]["corners"].shape[0]))
         # Pre-compute interpolation corners and weights so that applying the interpolated loss is quick and easy
@@ -156,6 +220,7 @@ def collate_atrain(batch: list) -> dict:
         interp_weights.append(torch.as_tensor(inst["input"]["interp"]["weights"], dtype=torch.float))
         cloud_scenario.append(torch.as_tensor(inst["output"]["cloud_scenario"], dtype=torch.long))
     coll_batch = {
+        "instance_id": torch.as_tensor(inst_ids),
         "input": {
             "sensor_input": torch.stack(sensor_input, dim=0),
             "interp": {
