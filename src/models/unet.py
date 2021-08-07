@@ -26,6 +26,10 @@ class Down(nn.Module):
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
 
+        # focal loss bias initialization
+        nn.init.normal_(self.conv1.bias, mean=0, std=0.01)
+        nn.init.normal_(self.conv2.bias, mean=0, std=0.01)
+
     def forward(self, x):
         x = self.mp(x)
         x = self.conv1(x)
@@ -53,6 +57,10 @@ class Up(nn.Module):
         self.bn1 = nn.BatchNorm2d(in_channels // 2)
         self.conv2 = nn.Conv2d(in_channels // 2, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
+
+        # focal loss bias initialization
+        nn.init.normal_(self.conv1.bias, mean=0, std=0.01)
+        nn.init.normal_(self.conv2.bias, mean=0, std=0.01)
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
@@ -96,8 +104,10 @@ class UNet(nn.Module):
             self.num_layers = int(np.log(min(self.img_dims)) / np.log(2))
         else:
             self.num_layers = num_layers
+
         self.pre_conv_a = nn.Conv2d(self.in_channels, self.base_depth, kernel_size=1)
         self.pre_conv_b = nn.Conv2d(self.in_channels, self.base_depth // 2, kernel_size=1)
+
         self.down_blocks = []
         for i in range(self.num_layers - 1):
             self.down_blocks.append(Down(self.base_depth * (2 ** i), self.base_depth * (2 ** (i + 1))))
@@ -110,6 +120,11 @@ class UNet(nn.Module):
             self.up_blocks.append(Up(int(self.base_depth * (2 ** i)), int(base_depth * (2 ** (i - 2)))))
         self.up_blocks = nn.Sequential(*self.up_blocks)
         self.post_conv = nn.Conv2d(self.base_depth, out_channels, kernel_size=1)
+
+        # focal loss bias initialization
+        nn.init.normal_(self.pre_conv_a.bias, mean=0, std=0.01)
+        nn.init.normal_(self.pre_conv_b.bias, mean=0, std=0.01)
+        nn.init.constant_(self.post_conv.bias, -np.log(99))
 
     def forward(self, x):
         x_down = [self.pre_conv_a(x)]
