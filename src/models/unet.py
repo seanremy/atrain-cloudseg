@@ -30,7 +30,7 @@ class Down(nn.Module):
         nn.init.normal_(self.conv1.bias, mean=0, std=0.01)
         nn.init.normal_(self.conv2.bias, mean=0, std=0.01)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.mp(x)
         x = self.conv1(x)
         x = self.bn1(x)
@@ -44,7 +44,7 @@ class Down(nn.Module):
 class Up(nn.Module):
     """Upsampling block in a U-Net."""
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
         """Create an Up block.
 
         Args:
@@ -62,7 +62,7 @@ class Up(nn.Module):
         nn.init.normal_(self.conv1.bias, mean=0, std=0.01)
         nn.init.normal_(self.conv2.bias, mean=0, std=0.01)
 
-    def forward(self, x1, x2):
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         x1 = self.up(x1)
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
@@ -126,7 +126,7 @@ class UNet(nn.Module):
         nn.init.normal_(self.pre_conv_b.bias, mean=0, std=0.01)
         nn.init.constant_(self.post_conv.bias, -np.log(99))
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_down = [self.pre_conv_a(x)]
         x_skip = self.pre_conv_b(x)
         for db in self.down_blocks:

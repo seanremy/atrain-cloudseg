@@ -109,7 +109,7 @@ class ContractingArm3(nn.Module):
     inputs into a separate 1x1 conv before the addition.
     """
 
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
         """Create a ContractingArm3.
 
         Args:
@@ -131,7 +131,7 @@ class ContractingArm3(nn.Module):
         self.conv_c = nn.Conv2d(out_channels, out_channels, kernel_size=1, padding="same")
         self.bn_c = nn.BatchNorm2d(out_channels)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # branch A
         x_a = self.conv_a(x)
         x_a = F.relu(self.bn_a(x_a))
@@ -170,7 +170,7 @@ class ExpandingArm(nn.Module):
         self.conv3 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
         self.bn2 = nn.BatchNorm2d(out_channels)
 
-    def forward(self, x, y):
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         x_t = self.conv1(x)
         x = torch.cat([x_t, y], dim=1)
         x = self.conv2(x)
@@ -185,7 +185,7 @@ class ExpandingArm3(nn.Module):
     Like ExpandingArm but has three 3x3 conv layers.
     """
 
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
         """Create an ExpandingArm3.
 
         Args:
@@ -201,7 +201,7 @@ class ExpandingArm3(nn.Module):
         self.conv4 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding="same")
         self.bn3 = nn.BatchNorm2d(out_channels)
 
-    def forward(self, x, y):
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         x_t = self.conv1(x)
         x = torch.cat([x_t, y], dim=1)
         x = self.conv2(x)
