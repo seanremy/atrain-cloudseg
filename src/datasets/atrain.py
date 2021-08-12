@@ -5,10 +5,18 @@ output is cloud scenario labels from the CALTRACK CLDCLASS product.
 import json
 import os
 import pickle
+import random
+import sys
+from typing import Callable
 
 import numpy as np
 import torch
+import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
+
+if "./src" not in sys.path:
+    sys.path.insert(0, "./src")  # TO DO: change this once it's a package
+from datasets.normalization import ATRAIN_MEANS, ATRAIN_STDS
 
 ALL_METRICS = [
     "cloud_mask_accuracy",
@@ -17,28 +25,40 @@ ALL_METRICS = [
     "cloudtop_height_bin_offset_error",
 ]
 MASK_ONLY_METRICS = ["cloud_mask_accuracy", "cloudtop_height_bin_accuracy", "cloudtop_height_bin_offset_error"]
+SQUASH_BINS_METRICS = ["cloud_mask_accuracy"]
 
 
 class ATrain(Dataset):
     """The A-Train Dataset."""
 
     def __init__(
-        self, mode: str, split_name: str = "split_default", get_nondir: bool = False, get_flags: bool = False
+        self,
+        mode: str,
+        angles_to_omit: list = [],
+        fields_to_omit: list = [],
+        get_nondir: bool = False,
+        get_flags: bool = False,
+        split_name: str = "split_default",
     ) -> None:
         """Create an A-Train Dataset.
 
         Args:
             mode: Which mode to use for training. In the default split, this must be 'train' or 'val'.
-            split_name: The name of the split file to use.
+            fields_to_omit: List of fields to omit from the dataset, defaults to an empty list.
             get_nondir: Get non-directional fields for each instance. Considerably slows down data loading. Defaults to
                         False.
             get_flags: Get flags for the cloud scenario output. Defaults to False.
+            split_name: The name of the split file to use.
+
         """
         super().__init__()
         self.mode = mode
-        self.split_name = split_name
+        self.angles_to_omit = angles_to_omit
+        self.num_angles = 16 - len(angles_to_omit)
+        self.fields_to_omit = fields_to_omit
         self.get_nondir = get_nondir
         self.get_flags = get_flags
+        self.split_name = split_name
 
         self.dataset_root = os.path.join(os.path.dirname(__file__), "..", "..", "data", "atrain")
         self.datagen_info = json.load(open(os.path.join(self.dataset_root, "dataset_generation_info.json")))
@@ -48,9 +68,13 @@ class ATrain(Dataset):
         # load our split, get the instance ids
         self.split = json.load(open(os.path.join(self.dataset_root, f"{self.split_name}.json")))
         self.instance_ids = list(self.split[self.mode])
-        # TO DO: remove
+        # read class counts (pre-computed)
+        self.cls_counts = json.load(open(os.path.join(self.dataset_root, "class_counts.json")))
+        self.cls_counts = {int(k): v for k, v in self.cls_counts.items()}
+        # TO DO: remove this when the empty instance problem is fixed
         bad_instances = json.load(open(os.path.join(self.dataset_root, "bad_instances.json")))
         self.instance_ids = [i for i in self.instance_ids if i not in bad_instances]
+
         # pre-compute length so we don't have to later; it won't change
         self.len = len(self.instance_ids)
 
@@ -60,9 +84,13 @@ class ATrain(Dataset):
         channel_idx = 0
         for i in range(len(self.datagen_info["par_fields"])):
             field = self.datagen_info["par_fields"][i]
+            if field in self.fields_to_omit:
+                continue
             if field[0] == "Data_Directional_Fields":
-                self.multi_angle_idx += list(range(channel_idx, channel_idx + 16))
-                channel_idx += 16  # 16 angles
+                self.multi_angle_idx += [
+                    channel_idx + angle_idx for angle_idx in range(16) if angle_idx not in self.angles_to_omit
+                ]
+                channel_idx += self.num_angles
             else:
                 self.nondir_fields.append(field[1])
                 channel_idx += 1
@@ -142,7 +170,15 @@ class ATrain(Dataset):
         return item
 
     def evaluate(self, predictions: dict, metrics: list[str] = ALL_METRICS) -> dict:
-        """TO DO"""
+        """Evaluate a set of predictions w.r.t. a set of metrics on this dataset.
+
+        Args:
+            predictions: The predictions to evaluate.
+            metrics: The list of metrics to evaluate.
+
+        Returns:
+            metrics: The metrics' evaluations on the provided predictions.
+        """
         metrics = {m: [] for m in metrics}
         for inst_id in self.instance_ids:
             if inst_id not in predictions:
@@ -155,7 +191,9 @@ class ATrain(Dataset):
             gt_labels = pickle.load(open(os.path.join(self.dataset_root, inst["output_path"]), "rb"))
             gt_cloud_scenario = gt_labels["cloud_scenario"]["cloud_scenario"]
 
-            assert gt_cloud_scenario.shape == pred.shape
+            # if we're squashing bins
+            if pred.shape[1] == 1:
+                gt_cloud_scenario = np.sum(gt_cloud_scenario, axis=1, keepdims=True) > 0
 
             gt_cloud_mask = (gt_cloud_scenario > 0).any(axis=1)
             pred_cloud_mask = (pred > 0).any(axis=1)
@@ -167,9 +205,6 @@ class ATrain(Dataset):
 
             h_bins_pred = np.array([_min(np.where(pred[i].cpu().detach().numpy())[0]) for i in range(pred.shape[0])])
             h_bins_gt = np.array([_min(np.where(gt_cloud_scenario[i])[0]) for i in range(gt_cloud_scenario.shape[0])])
-            import pdb
-
-            pdb.set_trace()
 
             if "cloud_mask_accuracy" in metrics:
                 # cloud mask accuracy := proportion of pixels correctly identified as cloud / not cloud
@@ -188,6 +223,7 @@ class ATrain(Dataset):
                 both_clouds = pred_cloud_mask.cpu().detach().numpy() * gt_cloud_mask
                 height_bin_offsets = np.abs(h_bins_pred[both_clouds] - h_bins_gt[both_clouds])
                 metrics["cloudtop_height_bin_offset_error"].append(np.mean(height_bin_offsets))
+
         metrics["instance_ids"] = list(self.instance_info.keys())
         metrics = {k: np.array(v) for k, v in metrics.items()}
         return metrics
@@ -260,27 +296,88 @@ def interp_atrain_output(batch: dict, out: torch.Tensor) -> torch.Tensor:
     Returns:
         out_interp: The interpolated output.
     """
-    out = out.permute(0, 2, 3, 1)
+    out = out.permute(0, 2, 3, 1)  # (B, H, W, C)
 
-    batch_idx = batch["input"]["interp"]["batch_idx"]
+    # repeat the batch index for the 4 interp corners
+    batch_idx = batch["input"]["interp"]["batch_idx"].expand(4, -1).T.reshape(-1)
+
+    # height and width
+    patch_shape = batch["input"]["sensor_input"].shape[-2:]
+
+    # index to the 4 interp corners
     corner_idx = batch["input"]["interp"]["corners"]
-    patch_shape = batch["input"]["sensor_input"].shape[2:4]
-
-    # handle out of bounds by simply shifting the offending indices back in bounds...
-    # ...this makes it effectively nearest-neighbor on that axis
+    # keep the corners in bounds
     corner_idx[corner_idx[:, :, 0] < 0] = 0  # too high
     corner_idx[corner_idx[:, :, 0] >= patch_shape[0]] = patch_shape[0] - 1  # too low
     corner_idx[corner_idx[:, :, 1] < 0] = 0  # too far left
     corner_idx[corner_idx[:, :, 1] >= patch_shape[1]] = patch_shape[1] - 1  # too far right
-
+    # get it as a flat index
     corner_idx = corner_idx[:, :, 0] * patch_shape[0] + corner_idx[:, :, 1]
-    corner_idx = corner_idx.view(-1)
+    corner_idx = corner_idx.reshape(-1)
 
-    idx = batch_idx.repeat(4) * patch_shape[0] * patch_shape[1] + corner_idx
+    # add the batch index to get the overall index
+    idx = batch_idx * patch_shape[0] * patch_shape[1] + corner_idx
+
+    # get the corner values
     out_corners = out.reshape(-1, out.shape[3])[idx]
 
+    # get the weights of each corner
     weights = batch["input"]["interp"]["weights"].view(-1)
-    out_corners_weighted = weights.repeat(out_corners.shape[1], 1).T * out_corners
-    out_corners_weighted = out_corners.view(weights.shape[0] // 4, 4, out_corners.shape[1])
+
+    # get the weighted corner values
+    out_corners_weighted = weights.reshape(-1, 1) * out_corners
+    out_corners_weighted = out_corners_weighted.view(weights.shape[0] // 4, 4, out_corners.shape[1])
+
+    # sum up the weighted corner values to get final interpolated values
     out_interp = torch.sum(out_corners_weighted, dim=1)
     return out_interp
+
+
+def get_norm_transform(multi_angle_idx: list) -> Callable:
+    """Normalization transform. Normalizes sensor input by the A-Train means and standard deviations."""
+    means = ATRAIN_MEANS[multi_angle_idx]
+    stds = ATRAIN_STDS[multi_angle_idx]
+
+    def norm_transform(batch: dict) -> dict:
+        batch["input"]["sensor_input"] = TF.normalize(batch["input"]["sensor_input"], means, stds)
+        return batch
+
+    return norm_transform
+
+
+def random_hflip(batch: dict) -> dict:
+    """Random horizontal flip trnasform. Also flips the interpolation corners."""
+    if random.random() > 0.5:
+        batch["input"]["sensor_input"] = TF.hflip(batch["input"]["sensor_input"])
+        w = batch["input"]["sensor_input"].shape[-1]
+        corners_x = batch["input"]["interp"]["corners"][..., 0]
+        corners_x = w - corners_x - 1
+        batch["input"]["interp"]["corners"][..., 0] = corners_x
+    return batch
+
+
+def random_vflip(batch: dict) -> dict:
+    """Random vertical flip trnasform. Also flips the interpolation corners."""
+    if random.random() > 0.5:
+        batch["input"]["sensor_input"] = TF.vflip(batch["input"]["sensor_input"])
+        h = batch["input"]["sensor_input"].shape[-2]
+        corners_y = batch["input"]["interp"]["corners"][..., 1]
+        corners_y = h - corners_y - 1
+        batch["input"]["interp"]["corners"][..., 1] = corners_y
+    return batch
+
+
+def get_transforms(mode: str, multi_angle_idx: list) -> list:
+    """Get the list of transforms for either 'train' or 'val'.
+
+    Args:
+        mode: Specifies 'train' or 'val'.
+
+    Returns:
+        transforms: The list of transform functions.
+    """
+    if mode == "train":
+        transforms = [get_norm_transform(multi_angle_idx), random_hflip, random_vflip]
+    elif mode == "val":
+        transforms = [get_norm_transform(multi_angle_idx)]
+    return transforms
