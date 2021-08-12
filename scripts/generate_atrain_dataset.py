@@ -120,12 +120,9 @@ def main() -> None:
     seed = np.random.randint(1e6)
     np.random.seed(seed)
 
-    # the intersection of the operational lifetimes of the relevant A-Train satellites starts on 06/15/2006...
-    start_date = datetime(year=2006, month=6, day=15)
-    # ...and ends on 10/10/2013
-    end_date = datetime(year=2013, month=10, day=10)
-    # this is the first file timestamp with valid data
-    start_datetime = datetime(year=2006, month=6, day=19, hour=14, minute=57, second=39)
+    # the time window where PARASOL, CALIOP, and CloudSat were all operational, before later orbital corrections:
+    start_date = datetime(year=2007, month=11, day=27)
+    end_date = datetime(year=2009, month=12, day=2)
 
     # if resuming, pick up where we left off
     if args.resume and not os.path.exists(os.path.join(args.atrain_dir, "instance_info.json")):
@@ -178,7 +175,7 @@ def main() -> None:
         # get indices of all files that fall within the valid datetime range
         cal_par_sort_order = []
         for i in range(len(cal_par_datetimes)):
-            if cal_par_datetimes[i] >= start_datetime and (not args.resume or cal_par_datetimes[i] > last_datetime):
+            if not args.resume or cal_par_datetimes[i] > last_datetime:
                 cal_par_sort_order.append(i)
         cal_par_sort_order = sorted(cal_par_sort_order, key=lambda idx: cal_par_datetimes[idx])
 
