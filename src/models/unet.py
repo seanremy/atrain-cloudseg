@@ -26,9 +26,9 @@ class Down(nn.Module):
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
 
-        # focal loss bias initialization
-        nn.init.normal_(self.conv1.bias, mean=0, std=0.01)
-        nn.init.normal_(self.conv2.bias, mean=0, std=0.01)
+        # # focal loss bias initialization
+        # nn.init.normal_(self.conv1.bias, mean=0, std=0.01)
+        # nn.init.normal_(self.conv2.bias, mean=0, std=0.01)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.mp(x)
@@ -58,9 +58,9 @@ class Up(nn.Module):
         self.conv2 = nn.Conv2d(in_channels // 2, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
 
-        # focal loss bias initialization
-        nn.init.normal_(self.conv1.bias, mean=0, std=0.01)
-        nn.init.normal_(self.conv2.bias, mean=0, std=0.01)
+        # # focal loss bias initialization
+        # nn.init.normal_(self.conv1.bias, mean=0, std=0.01)
+        # nn.init.normal_(self.conv2.bias, mean=0, std=0.01)
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         x1 = self.up(x1)
@@ -121,14 +121,14 @@ class UNet(nn.Module):
         self.up_blocks = nn.Sequential(*self.up_blocks)
         self.post_conv = nn.Conv2d(self.base_depth, out_channels, kernel_size=1)
 
-        # focal loss bias initialization
-        nn.init.normal_(self.pre_conv_a.bias, mean=0, std=0.01)
-        nn.init.normal_(self.pre_conv_b.bias, mean=0, std=0.01)
-        nn.init.constant_(self.post_conv.bias, -np.log(99))
+        # # focal loss bias initialization
+        # nn.init.normal_(self.pre_conv_a.bias, mean=0, std=0.01)
+        # nn.init.normal_(self.pre_conv_b.bias, mean=0, std=0.01)
+        # nn.init.constant_(self.post_conv.bias, -np.log(99))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_down = [self.pre_conv_a(x)]
-        x_skip = self.pre_conv_b(x)
+        x_down = [F.relu(self.pre_conv_a(x))]
+        x_skip = F.relu(self.pre_conv_b(x))
         for db in self.down_blocks:
             x_down.append(db(x_down[-1]))
         x_up = x_down.pop(-1)
