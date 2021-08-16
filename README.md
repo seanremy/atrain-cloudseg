@@ -27,7 +27,7 @@ If you're interested in machine learning or computer vision, you may find this d
 
 If you come from the atmospheric remote sensing community, you may find this dataset interesting because:
 - Multi-angle inputs and vertical cloud profile labels enable cloud-top height estimation, possibly overcoming parallax problems during Level-1C processing.
-- Input contains 9 spectral bands, 3 of which have polarization values. As far as we know, this is the only large-scale cloud mask dataset containing polarization.
+- Input contains 9 spectral bands, 3 of which have polarization values. As far as we know, this is the only similarly formatted large-scale cloud mask dataset containing polarization.
 
 ----------------------------------------------------------------
 ## Dataset
@@ -50,7 +50,7 @@ Data is sampled randomly from 11/27/2007 to 12/2/2009, as this is the intersecti
 
 Input comes from the [POLDER](https://www.eorc.jaxa.jp/ADEOS/Project/Polder.html) sensor on the [PARASOL](https://www.icare.univ-lille.fr/parasol/mission/) satellite. Input arrays are formatted as 100x100 patches, which are equirectangular projections centered on the patch center. Each pixel has up to 16 different angles, each with 18 values, resulting in 288 image channels per pixel. Ground sample distance is approximately 6 km. Note: angles are imaged at different times, and clouds may drift between angles. Due to the high ground sample distance, this drift should rarely exceed 1 or 2 pixels.
 
-TO DO: 3D visualization of false color image
+TO DO: visualization of false color image
 
 ### Output
 
