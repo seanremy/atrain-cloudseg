@@ -118,6 +118,10 @@ You can configure patch size, sampling rates, maximum time offset, minimum numbe
 
         python scripts/generate_atrain_dataset.py -h
 
+After generating the dataset, you still need generate one or more train/val splits. To see usage for the split generation script, run:
+
+        python scripts/generate_split.py -h
+
 ----------------------------------------------------------------
 ## Contributing
 
