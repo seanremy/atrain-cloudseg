@@ -57,7 +57,7 @@ Some examples images are shown below. These images are averaged over the 4 centr
 Outputs are not hand-labeled, and instead come from the [CloudSat](https://cloudsat.atmos.colostate.edu/) satellite. More specifically, we source the data from 2 [CALTRACK](https://www.icare.univ-lille.fr/calxtract/) products: [2B-CLDCLASS](http://www.cloudsat.cira.colostate.edu/data-products/level-2b/2b-cldclass) (vertical cloud profiles), and CALTRACK-5km_PAR-RB2 (from the [CALIPSO](https://www-calipso.larc.nasa.gov/) mission) for time synchronization.
 
 There are two main limitations of these outputs.
-1. Since CloudSat uses a LiDAR to acquire vertical cloud profiles, the output is only defined for a sparse set of locations in the input grid. This tends to look like a mostly vertical line running through the input image. We constrain sampled locations so that there are at least 10 pixels between the output locations and the east/west borders of the image.
+1. Since CloudSat's radar only acquires vertical cloud profiles in a narrow band, the output is only defined for a sparse set of locations in the input grid. This tends to look like a mostly vertical line running through the input image. We constrain sampled locations so that there are at least 10 pixels between the output locations and the east/west borders of the image.
 2. There is a temporal delay between POLDER and CLDCLASS measurements, so cloud locations may have slightly changed. Temporal offset tends to be within 3 minutes, so only the fastest-moving clouds will drift more than 1 pixel.
 
 An example label is displayed below:
