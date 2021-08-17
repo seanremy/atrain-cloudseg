@@ -36,9 +36,7 @@ ATCS consists of data from multiple satellites in the [A-Train Constellation](ht
 
 Instances are formatted as input/output pairs. The dataset contains over 10k pairs, split into training (80%) and validation (20%) sets.
 
-TO DO: 3D visualization of false color image + output vertical cloud profile
-
-Data is sampled equally across the globe, between 60°N and 60°S.
+Data is sampled equally across the globe, between 60°N and 60°S. Coverage is relatively uniform, and spans the globe:
 
 ![Dataset Geospatial Coverage](/figs/global_coverage.png)
 
@@ -50,7 +48,13 @@ Data is sampled randomly from 11/27/2007 to 12/2/2009, as this is the intersecti
 
 Input comes from the [POLDER](https://www.eorc.jaxa.jp/ADEOS/Project/Polder.html) sensor on the [PARASOL](https://www.icare.univ-lille.fr/parasol/mission/) satellite. Input arrays are formatted as 100x100 patches, which are equirectangular projections centered on the patch center. Each pixel has up to 16 different angles, each with 18 values, resulting in 288 image channels per pixel. Ground sample distance is approximately 6 km. Note: angles are imaged at different times, and clouds may drift between angles. Due to the high ground sample distance, this drift should rarely exceed 1 or 2 pixels.
 
-TO DO: visualization of false color image
+Some examples images are shown below. These images are averaged over the 4 central angles, interpolated to simulate true color, and max-min normalized.
+
+![Input Example 1](/figs/input_ex0.png)
+![Input Example 2](/figs/input_ex1.png)
+![Input Example 3](/figs/input_ex2.png)
+![Input Example 4](/figs/input_ex4.png)
+![Input Example 5](/figs/input_ex7.png)
 
 ### Output
 
@@ -60,12 +64,18 @@ There are two main limitations of these outputs.
 1. Since CloudSat uses a LiDAR to acquire vertical cloud profiles, the output is only defined for a sparse set of locations in the input grid. This tends to look like a mostly vertical line running through the input image. We constrain sampled locations so that there are at least 10 pixels between the output locations and the east/west borders of the image.
 2. There is a temporal delay between POLDER and CLDCLASS measurements, so cloud locations may have slightly changed. Temporal offset tends to be within 3 minutes, so only the fastest-moving clouds will drift more than 1 pixel.
 
-TO DO: visualization of vertical cloud profile
+An example label is displayed below:
+
+<img src="./figs/output_ex.png" width="300" style="display: block; margin-left: auto; margin-right: auto">
+
+The same example, displayed over its associated image. The green line shows the set of points for which we have supervision:
+
+![3D in/out viz](/figs/3d_cloud_viz.png)
 
 ----------------------------------------------------------------
 ## Models
 
-(WIP: experiments running)
+(TODO: experiments running)
 
 ----------------------------------------------------------------
 ## Installation
