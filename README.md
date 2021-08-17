@@ -62,7 +62,7 @@ There are two main limitations of these outputs.
 
 An example label is displayed below:
 
-<img src="./figs/output_ex.png" width="300" style="display: block; margin-left: auto; margin-right: auto">
+<img src="./figs/output_ex.png" width="50%" style="display: block; margin-left: auto; margin-right: auto;">
 
 The same example, displayed over its associated image. The green line shows the set of points for which we have supervision:
 
