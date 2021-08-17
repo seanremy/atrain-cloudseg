@@ -48,13 +48,13 @@ Data is sampled randomly from 11/27/2007 to 12/2/2009, as this is the intersecti
 
 Input comes from the [POLDER](https://www.eorc.jaxa.jp/ADEOS/Project/Polder.html) sensor on the [PARASOL](https://www.icare.univ-lille.fr/parasol/mission/) satellite. Input arrays are formatted as 100x100 patches, which are equirectangular projections centered on the patch center. Each pixel has up to 16 different angles, each with 18 values, resulting in 288 image channels per pixel. Ground sample distance is approximately 6 km. Note: angles are imaged at different times, and clouds may drift between angles. Due to the high ground sample distance, this drift should rarely exceed 1 or 2 pixels.
 
-Some examples images are shown below. These images are averaged over the 4 central angles, interpolated to simulate true color, and max-min normalized.
+Some examples images are shown below. These images are averaged over the 4 central angles, interpolated to simulate true color, and max-min normalized:
 
-![Input Example 1](/figs/input_ex0.png)
-![Input Example 2](/figs/input_ex1.png)
-![Input Example 3](/figs/input_ex2.png)
-![Input Example 4](/figs/input_ex4.png)
-![Input Example 5](/figs/input_ex7.png)
+<img src="./figs/input_ex0.png" width="18%">
+<img src="./figs/input_ex1.png" width="18%">
+<img src="./figs/input_ex2.png" width="18%">
+<img src="./figs/input_ex3.png" width="18%">
+<img src="./figs/input_ex4.png" width="18%">
 
 ### Output
 
