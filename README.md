@@ -50,7 +50,7 @@ Input comes from the [POLDER](https://www.eorc.jaxa.jp/ADEOS/Project/Polder.html
 
 Some examples images are shown below. These images are averaged over the 4 central angles, interpolated to simulate true color, and max-min normalized:
 
-![Input Example](/figs/input_ex.png)
+<img src="./figs/input_ex.png" width="100%">
 
 ### Output
 
