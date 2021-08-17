@@ -50,11 +50,23 @@ Input comes from the [POLDER](https://www.eorc.jaxa.jp/ADEOS/Project/Polder.html
 
 Some examples images are shown below. These images are averaged over the 4 central angles, interpolated to simulate true color, and max-min normalized:
 
-<img src="./figs/input_ex0.png" width="18%">
-<img src="./figs/input_ex1.png" width="18%">
-<img src="./figs/input_ex2.png" width="18%">
-<img src="./figs/input_ex3.png" width="18%">
-<img src="./figs/input_ex4.png" width="18%">
+<div style="content: ''; clear: both; display: table;">
+        <div style="float: left; width: 18%; padding: 5px;">
+                <img src="./figs/input_ex0.png">
+        </div>
+        <div style="float: left; width: 18%; padding: 5px;">
+                <img src="./figs/input_ex1.png">
+        </div>
+        <div style="float: left; width: 18%; padding: 5px;">
+                <img src="./figs/input_ex2.png">
+        </div>
+        <div style="float: left; width: 18%; padding: 5px;">
+                <img src="./figs/input_ex3.png">
+        </div>
+        <div style="float: left; width: 18%; padding: 5px;">
+                <img src="./figs/input_ex4.png">
+        </div>
+</div>
 
 ### Output
 
