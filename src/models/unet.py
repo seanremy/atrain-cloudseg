@@ -99,11 +99,10 @@ class UNet(nn.Module):
         self.in_channels = in_channels
         self.base_depth = base_depth
         self.img_dims = img_dims
-        if num_layers is None:
-            # as many layers as can be fit with input at least 1x1
-            self.num_layers = int(np.log(min(self.img_dims)) / np.log(2))
-        else:
-            self.num_layers = num_layers
+        # as many layers as can be fit with input at least 1x1
+        self.num_layers = int(np.log(min(self.img_dims)) / np.log(2))
+        if not num_layers is None:
+            self.num_layers = min(num_layers, self.num_layers)
 
         self.pre_conv_a = nn.Conv2d(self.in_channels, self.base_depth, kernel_size=1)
         self.pre_conv_b = nn.Conv2d(self.in_channels, self.base_depth // 2, kernel_size=1)
