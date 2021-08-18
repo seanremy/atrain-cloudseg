@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
         help="Number of files to process per day. There are usually 14-15 files. Default is arbitrarily high at 1000.",
     )
     parser.add_argument(
-        "--samples_per_file", type=int, default=4, help="Goal number of samples to take per orbit file."
+        "--samples_per_file", type=int, default=16, help="Goal number of samples to take per orbit file."
     )
     parser.add_argument(
         "--patch_size",
