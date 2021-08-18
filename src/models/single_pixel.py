@@ -3,13 +3,14 @@ import torch.nn as nn
 
 
 class SinglePixel(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, num_layers: int = 3, mid_layer_depth=None) -> None:
+    def __init__(self, in_channels: int, out_channels: int, num_layers: int = 3, mid_layer_depth: int = None) -> None:
         """Create a Single Pixel model.
 
         Args:
             in_channels: Number of input channels.
             out_channels: Number of output channels.
             num_layers: Number of layers, defaults to 3.
+            mid_layer_depth: Depth of the middle layers.
         """
         super().__init__()
         assert num_layers >= 1
