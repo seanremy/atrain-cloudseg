@@ -11,15 +11,15 @@ import threading
 from collections.abc import Mapping
 from contextlib import nullcontext
 
-import ifcfg
 import numpy as np
 import torch
 import torch.distributed as distrib
-import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+
+from utils.parasol_fields import FIELD_DICT
 
 if "./src" not in sys.path:
     sys.path.insert(0, "./src")  # TO DO: change this once it's a package
@@ -37,6 +37,7 @@ from losses.segmentation import SmoothnessPenalty
 from models.single_pixel import SinglePixel
 from models.unet import UNet
 from utils.plotting import get_cloud_mask_viz
+from utils.slurm import init_distrib_slurm
 
 EXIT = threading.Event()
 EXIT.clear()
@@ -49,57 +50,38 @@ def parse_args() -> argparse.Namespace:
         args: Command-line argument namespace
     """
     parser = argparse.ArgumentParser()
+    parser.add_argument("--angles-to-omit", type=str, default="", help="Comma-separated list of angles to omit.")
     parser.add_argument("--arch", type=str, default="unet", help="Which model architecture to use.")
     parser.add_argument("--base-depth", type=int, default=64, help="Base depth for the U-Net model.")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size to use for training and validation.")
+    parser.add_argument("--dont-weight-loss", action="store_true", help="Don't class-weight the loss function.")
     parser.add_argument("--eval-frequency", type=int, default=1, help="How often (in epochs) to evaluate.")
     parser.add_argument("--exp-name", type=str, required=True, help="Name of the experiment.")
+    parser.add_argument("--fields", type=str, default="directional", help="Which fields to use as input.")
     parser.add_argument("--learning-rate", type=float, default=1e-3, help="Starting learning rate.")
-    parser.add_argument("--mask-only", action="store_true", help="Specify to only predict masks, and not cloud type.")
     parser.add_argument("--loss", type=str, default="cross-entropy", help="Which loss function to use.")
+    parser.add_argument("--mask-only", action="store_true", help="Specify to only predict masks, and not cloud type.")
+    parser.add_argument("--no-data-aug", action="store_true", help="Skip data augmentation, for debugging purposes.")
     parser.add_argument("--num-epochs", type=int, default=200, help="Number of epochs to run the experiment for.")
     parser.add_argument("--save-frequency", type=int, default=5, help="How often (in epochs) to checkpoint the model.")
+    parser.add_argument("--smoothness", type=int, default=0, help="Weight for the smoothness penalty.")
     parser.add_argument("--squash-bins", action="store_true", help="Squash the height bins into a binary mask.")
     args = parser.parse_args()
+    args.angles_to_omit = args.angles_to_omit.split(",")
+    if "" in args.angles_to_omit:
+        args.angles_to_omit.remove("")
+    for angle in args.angles_to_omit:
+        assert angle >= 0 and angle < 16
     assert args.base_depth > 0
     assert args.batch_size > 1
     assert args.eval_frequency > 0
+    assert args.fields in FIELD_DICT
     assert args.learning_rate > 0
     assert args.loss in loss_factory
     assert args.num_epochs > 0
     if args.squash_bins:
         args.mask_only = True
     return args
-
-
-def init_distrib_slurm(backend: str = "nccl") -> tuple[int, distrib.TCPStore]:
-    """Initialize the distributed backend in a way that plays nicely with SLURM.
-
-    Args:
-        backend: The name of the backend to use, defaults to 'nccl'.
-
-    Returns:
-        local_rank: The value of the LOCAL_RANK environment variable.
-        tcp_store: The TCP Store of the master process.
-    """
-    if "GLOO_SOCKET_IFNAME" not in os.environ:
-        os.environ["GLOO_SOCKET_IFNAME"] = ifcfg.default_interface()["device"]
-
-    if "NCCL_SOCKET_IFNAME" not in os.environ:
-        os.environ["NCCL_SOCKET_IFNAME"] = ifcfg.default_interface()["device"]
-
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
-    master_port = int(os.environ.get("MASTER_PORT", 8738))
-    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
-    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", 0)))
-    world_rank = int(os.environ.get("RANK", os.environ.get("SLURM_PROCID", 0)))
-    world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", 1)))
-
-    tcp_store = distrib.TCPStore(master_addr, master_port, world_size, world_rank == 0)
-    distrib.init_process_group(backend, store=tcp_store, rank=world_rank, world_size=world_size)
-
-    return local_rank, tcp_store
 
 
 def convert_groupnorm_model(module: nn.Module, ngroups: int = 32) -> nn.Module:
@@ -173,11 +155,24 @@ def run_epoch(
     device = next(model.parameters()).device
     context = nullcontext() if mode == "train" else torch.no_grad()
     transforms = get_transforms(mode, dloader.dataset.multi_angle_idx)
+    if args.no_data_aug:
+        transforms = transforms[:1]  # if no aug, keep only the normalization
 
-    # TO DO: remove. this just keeps the normalization transform
-    transforms = [transforms[0]]
+    cls_weight = None
+    if not args.dont_weight_loss:
+        # effective sample number class weighting: https://arxiv.org/abs/1901.05555
+        cc = dloader.dataset.split["train_counts"]["cls_counts"]
+        if args.mask_only:
+            cc = [cc[0], sum(cc[1:])]
+        total = sum(cc)
+        beta = (total - 1) / total
+        inv_E_n = [(1 - beta) / (1 - beta ** count) for count in cc]
+        cls_weight = [x / sum(inv_E_n) for x in inv_E_n]
+        cls_weight = torch.Tensor(cls_weight).cuda()
 
-    objective = loss_factory[args.loss](125 if not args.squash_bins else 1, 9 if not args.mask_only else 2)
+    objective = loss_factory[args.loss](
+        125 if not args.squash_bins else 1, 9 if not args.mask_only else 2, weight=cls_weight
+    )
     penalty = SmoothnessPenalty()
 
     stats = torch.zeros((3,), device=device)
@@ -208,7 +203,8 @@ def run_epoch(
             else:
                 pred_classes = torch.argmax(out_interp.view(-1, 9), dim=-1)
             loss = objective(out_interp, batch)  # average loss per pixel, per height bin
-            # loss += 0.4 * penalty(out, batch)  # TO DO: make this more customizable
+            if args.smoothness > 0:
+                loss += args.smoothness * penalty(out, batch)
             loss_total = loss * out_interp.numel()  # multiply by num elements to get total loss
 
         if mode == "train":
@@ -335,30 +331,9 @@ def main():
     distrib.barrier()
 
     make_exp_dir(args)
-
-    # TO DO: don't omit any fields
-    angles_to_omit = [0, 1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15]
-    fields_to_omit = [
-        ["Data_Directional_Fields", "I443NP"],
-        ["Data_Directional_Fields", "I490P"],
-        ["Data_Directional_Fields", "Q490P"],
-        ["Data_Directional_Fields", "U490P"],
-        ["Data_Directional_Fields", "I565NP"],
-        ["Data_Directional_Fields", "I670P"],
-        ["Data_Directional_Fields", "Q670P"],
-        ["Data_Directional_Fields", "U670P"],
-        ["Data_Directional_Fields", "I763NP"],
-        ["Data_Directional_Fields", "I765NP"],
-        # ["Data_Directional_Fields", "I865P"],
-        ["Data_Directional_Fields", "Q865P"],
-        ["Data_Directional_Fields", "U865P"],
-        ["Data_Directional_Fields", "I910NP"],
-        ["Data_Directional_Fields", "I1020NP"],
-    ]
-
-    # TO DO: change back to default split
-    atrain_train = ATrain("train", angles_to_omit=angles_to_omit, fields_to_omit=fields_to_omit)
-    atrain_val = ATrain("val", angles_to_omit=angles_to_omit, fields_to_omit=fields_to_omit)
+    fields = FIELD_DICT[args.fields]
+    atrain_train = ATrain("train", angles_to_omit=args.angles_to_omit, fields=fields)
+    atrain_val = ATrain("val", angles_to_omit=args.angles_to_omit, fields=fields)
     train_loader = DataLoader(
         atrain_train,
         batch_size=args.batch_size,
