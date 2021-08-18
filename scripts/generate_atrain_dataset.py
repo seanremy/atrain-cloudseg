@@ -254,6 +254,10 @@ def main() -> None:
                 patch_labels = cldclass_scene.get_patch_labels(par_scene, patch_box)
                 patch_labels["instance_id"] = inst_id_ctr
 
+                # skip instances with empty labels
+                if 0 in patch_labels["cloud_scenario"]["cloud_scenario"].shape:
+                    continue
+
                 # get the paths
                 input_dir = os.path.join("input", date_subpath)
                 output_dir = os.path.join("output", date_subpath)
@@ -262,6 +266,7 @@ def main() -> None:
                 input_path = os.path.join(input_dir, f"{inst_id_ctr}.npy")
                 output_path = os.path.join(output_dir, f"{inst_id_ctr}.pkl")
 
+                # save everything
                 instance_info[inst_id_ctr] = {
                     "cal_par_file": cal_par_scene.filepath,
                     "par_file": par_scene.filepath,
@@ -277,6 +282,7 @@ def main() -> None:
                 json.dump(instance_info, open(os.path.join(args.atrain_dir, "instance_info.json"), "w"))
 
     icare_ses.cleanup()
+    print("Done generating dataset!!")
 
 
 if __name__ == "__main__":
