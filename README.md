@@ -87,8 +87,9 @@ The same example, displayed over its associated image. The green line shows the 
 
 3. Download and extract the dataset (WIP: download server under construction)
 
-4. Make a symbolic link to the dataset directory:
+4. Make the data and experiments directories, plus make a symbolic link to the dataset directory:
 
+        mkdir data && mkdir experiments
         ln -s <path-to-extracted-dataset> data/atrain
 
 ----------------------------------------------------------------
