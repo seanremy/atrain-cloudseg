@@ -35,7 +35,7 @@ class ATrain(Dataset):
         self,
         mode: str,
         angles_to_omit: list = [],
-        fields_to_omit: list = [],
+        fields: list = [],
         get_nondir: bool = False,
         get_flags: bool = False,
         split_name: str = "split_default",
@@ -44,18 +44,18 @@ class ATrain(Dataset):
 
         Args:
             mode: Which mode to use for training. In the default split, this must be 'train' or 'val'.
-            fields_to_omit: List of fields to omit from the dataset, defaults to an empty list.
+            fields: List of fields to get in this dataset.
             get_nondir: Get non-directional fields for each instance. Considerably slows down data loading. Defaults to
                         False.
             get_flags: Get flags for the cloud scenario output. Defaults to False.
             split_name: The name of the split file to use.
-
         """
         super().__init__()
+        assert all([a >= 0 and a < 16 for a in angles_to_omit])
         self.mode = mode
         self.angles_to_omit = angles_to_omit
         self.num_angles = 16 - len(angles_to_omit)
-        self.fields_to_omit = fields_to_omit
+        self.fields = [list(f) for f in fields]
         self.get_nondir = get_nondir
         self.get_flags = get_flags
         self.split_name = split_name
@@ -68,35 +68,30 @@ class ATrain(Dataset):
         # load our split, get the instance ids
         self.split = json.load(open(os.path.join(self.dataset_root, f"{self.split_name}.json")))
         self.instance_ids = list(self.split[self.mode])
-        # read class counts (pre-computed)
-        self.cls_counts = json.load(open(os.path.join(self.dataset_root, "class_counts.json")))
-        self.cls_counts = {int(k): v for k, v in self.cls_counts.items()}
-        # TO DO: remove this when the empty instance problem is fixed
-        bad_instances = json.load(open(os.path.join(self.dataset_root, "bad_instances.json")))
-        self.instance_ids = [i for i in self.instance_ids if i not in bad_instances]
 
         # pre-compute length so we don't have to later; it won't change
         self.len = len(self.instance_ids)
 
         # get index of just the multi-angle fields
         self.multi_angle_idx = []
+        self.nondir_idx = []
         self.nondir_fields = []
         channel_idx = 0
         for i in range(len(self.datagen_info["par_fields"])):
             field = self.datagen_info["par_fields"][i]
-            if field in self.fields_to_omit:
-                continue
             if field[0] == "Data_Directional_Fields":
-                self.multi_angle_idx += [
-                    channel_idx + angle_idx for angle_idx in range(16) if angle_idx not in self.angles_to_omit
-                ]
-                channel_idx += self.num_angles
+                if field in self.fields:
+                    self.multi_angle_idx += [
+                        channel_idx + angle_idx for angle_idx in range(16) if angle_idx not in self.angles_to_omit
+                    ]
+                channel_idx += 16
             else:
-                self.nondir_fields.append(field[1])
+                if field in self.fields:
+                    self.nondir_fields.append(field[1])
+                    self.nondir_idx.append(channel_idx)
                 channel_idx += 1
-        if self.get_nondir:
-            self.nondir_idx = np.array([i for i in range(channel_idx) if i not in self.multi_angle_idx])
         self.multi_angle_idx = np.array(self.multi_angle_idx)
+        self.nondir_idx = np.array(self.nondir_idx)
 
     def __len__(self) -> int:
         """Get the length of this dataset."""
@@ -159,10 +154,12 @@ class ATrain(Dataset):
 
         if self.get_nondir:
             nondir_input = parasol_arr[:, :, self.nondir_idx]
-            item["nondirectional_fields"] = {}
+            item["input"]["nondirectional_fields"] = {}
             for i in range(len(self.nondir_fields)):
                 nondir_field = self.nondir_fields[i]
                 item["input"]["nondirectional_fields"][nondir_field] = nondir_input[:, :, i]
+            for f in ["lat", "lon", "height", "time"]:
+                item["output"][f] = output_dict.pop(f)
 
         if self.get_flags:
             item["output"]["cloud_scenario_flags"] = cloud_scenario_flags
@@ -211,15 +208,17 @@ class ATrain(Dataset):
                 metrics["cloud_mask_accuracy"].append(np.mean(gt_cloud_mask == pred_cloud_mask.cpu().detach().numpy()))
 
             if "cloud_scenario_accuracy" in metrics:
-                # cloud scenario accuracy := proportion of pixel + height bin combinations whose cloud scenario is correctly identified
+                # cloud scenario accuracy := proportion of pixel + height bin combinations whose cloud scenario is
+                #   correctly identified
                 metrics["cloud_scenario_accuracy"].append(np.mean(gt_cloud_scenario == pred.cpu().detach().numpy()))
 
             if "cloudtop_height_bin_accuracy" in metrics:
-                # cloud-top height bin accuracy := proportion of pixels whose highest cloud is correctly identified
+                # cloud-top height bin accuracy := proportion of pixels whose highest cloud bin is correctly identified
                 metrics["cloudtop_height_bin_accuracy"].append(np.mean(h_bins_pred == h_bins_gt))
 
             if "cloudtop_height_bin_offset_error" in metrics:
-                # cloud-top height bin offset := average distance between predicted and GT cloud-top height, only computed for points pixels where both prediction and GT have clouds
+                # cloud-top height bin offset := average distance between predicted and GT cloud-top height, only
+                #   computed for points pixels where both prediction and GT have clouds
                 both_clouds = pred_cloud_mask.cpu().detach().numpy() * gt_cloud_mask
                 height_bin_offsets = np.abs(h_bins_pred[both_clouds] - h_bins_gt[both_clouds])
                 metrics["cloudtop_height_bin_offset_error"].append(np.mean(height_bin_offsets))
@@ -275,6 +274,11 @@ def collate_atrain(batch: list) -> dict:
                     torch.as_tensor(instance["input"]["nondirectional_fields"][field_name])
                 )
         coll_batch["input"]["nondirectional_fields"] = {k: torch.stack(v, dim=0) for k, v in nondir_fields.items()}
+        geom_output = {f: [] for f in ["lat", "lon", "height", "time"]}
+        for instance in batch:
+            for f in geom_output:
+                geom_output[f].append(torch.as_tensor(instance["output"][f]))
+        coll_batch["output"]["geometry"] = {k: torch.cat(v, dim=0) for k, v in geom_output.items()}
 
     if "cloud_scenario_flags" in batch[0]["output"]:
         flags = {flag_name: [] for flag_name in batch[0]["output"]["cloud_scenario_flags"]}
