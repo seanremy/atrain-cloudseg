@@ -85,6 +85,28 @@ DEFAULT = [
     ("Geolocation_Fields", "surface_altitude"),
 ]
 
+# all directional fields
+DIRECTIONAL = [
+    ("Data_Directional_Fields", "I443NP"),
+    ("Data_Directional_Fields", "I490P"),
+    ("Data_Directional_Fields", "Q490P"),
+    ("Data_Directional_Fields", "U490P"),
+    ("Data_Directional_Fields", "I565NP"),
+    ("Data_Directional_Fields", "I670P"),
+    ("Data_Directional_Fields", "Q670P"),
+    ("Data_Directional_Fields", "U670P"),
+    ("Data_Directional_Fields", "I763NP"),
+    ("Data_Directional_Fields", "I765NP"),
+    ("Data_Directional_Fields", "I865P"),
+    ("Data_Directional_Fields", "Q865P"),
+    ("Data_Directional_Fields", "U865P"),
+    ("Data_Directional_Fields", "I910NP"),
+    ("Data_Directional_Fields", "I1020NP"),
+    ("Data_Directional_Fields", "phi"),
+    ("Data_Directional_Fields", "thetas"),
+    ("Data_Directional_Fields", "thetav"),
+]
+
 # The minimal set of fields to use for debugging
 MINIMAL = [
     ("Data_Directional_Fields", "I565NP"),
@@ -97,5 +119,6 @@ MINIMAL = [
 FIELD_DICT = {
     "all": ALL,
     "default": DEFAULT,
+    "directional": DIRECTIONAL,
     "minimal": MINIMAL,
 }
