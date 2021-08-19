@@ -1,7 +1,7 @@
 """Standard lists of fields to get from PARASOL files."""
 
 # All available fields
-ALL = [
+_ALL = [
     ("Data_Directional_Fields", "I443NP"),  # normalized radiance for channel 443NP
     ("Data_Directional_Fields", "I490P"),  # normalized radiance for channel 490P
     ("Data_Directional_Fields", "Q490P"),  # second component of Stokes Vector (Q) for channel 490P
@@ -58,7 +58,7 @@ ALL = [
 ]
 
 # The default set, which contains all of the wavelengths, but leaves out quality flags and phi
-DEFAULT = [
+_DEFAULT = [
     ("Data_Directional_Fields", "I443NP"),
     ("Data_Directional_Fields", "I490P"),
     ("Data_Directional_Fields", "Q490P"),
@@ -86,7 +86,7 @@ DEFAULT = [
 ]
 
 # all directional fields
-DIRECTIONAL = [
+_DIRECTIONAL = [
     ("Data_Directional_Fields", "I443NP"),
     ("Data_Directional_Fields", "I490P"),
     ("Data_Directional_Fields", "Q490P"),
@@ -108,17 +108,37 @@ DIRECTIONAL = [
 ]
 
 # The minimal set of fields to use for debugging
-MINIMAL = [
-    ("Data_Directional_Fields", "I565NP"),
+_MINIMAL = [
+    ("Data_Directional_Fields", "I865NP"),
     ("Data_Fields", "Nviews"),
     ("Data_Fields", "cloud_indicator"),
     ("Geolocation_Fields", "Latitude"),
     ("Geolocation_Fields", "Longitude"),
 ]
 
-FIELD_DICT = {
-    "all": ALL,
-    "default": DEFAULT,
-    "directional": DIRECTIONAL,
-    "minimal": MINIMAL,
+_BANDS = {
+    443: ["I443NP"],
+    490: ["I490P", "Q490P", "U490P"],
+    565: ["I565NP"],
+    670: ["I670P", "Q670P", "U670P"],
+    763: ["I763NP"],
+    765: ["I765NP"],
+    865: ["I865P", "Q865P", "U865P"],
+    910: ["I910NP"],
+    1020: ["I1020NP"],
 }
+_SINGLE_BAND_OTHER_FIELDS = [
+    ("Data_Directional_Fields", "phi"),
+    ("Data_Directional_Fields", "thetas"),
+    ("Data_Directional_Fields", "thetav"),
+]
+
+FIELD_DICT = {
+    "all": _ALL,
+    "default": _DEFAULT,
+    "directional": _DIRECTIONAL,
+    "minimal": _MINIMAL,
+}
+for band_wl, band_fields in _BANDS.items():
+    fields = [("Data_Directional_Fields", field) for field in band_fields] + _SINGLE_BAND_OTHER_FIELDS
+    FIELD_DICT[f"single_band_{band_wl}"] = fields
