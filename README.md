@@ -15,7 +15,7 @@ Official GitHub repository for the A-Train Cloud Segmentation Dataset.
 ----------------------------------------------------------------
 ## Overview
 
-The A-Train Cloud Segmentation Dataset (ATCS) is a large-scale, cloud segmentation dataset designed to meet the needs of both the computer vision and remote sensing communities. This repository contains everything you need to interface with the dataset, to train or evaluate our baseline models, and even to generate your own version of the dataset.
+The A-Train Cloud Segmentation Dataset (ATCS) is a large-scale, cloud segmentation dataset designed to make it easy for computer vision and remote sensing researchers to improve their cloud-finding models. This repository contains everything you need to interface with the dataset, to train or evaluate our baseline models, and even to generate your own version of the dataset.
 
 If you're interested in machine learning or computer vision, you may find this dataset interesting because:
 - It's large scale, with over 10k instances.
