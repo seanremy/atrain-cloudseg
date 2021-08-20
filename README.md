@@ -22,7 +22,7 @@ If you're interested in machine learning or computer vision, you may find this d
 - It's easy to use; all instances are pre-processed numpy / pickle objects.
 - Dataloaders and models are implemented in [Pytorch](https://pytorch.org/).
 - Input images have 288 channels, posing a unique challenge.
-- Labels are rich, containing cloud types for 125 height bins.
+- Labels are rich, containing cloud types for 125 altitude bins.
 - Labels are sparse, making this an interesting test-case for sparse supervision.
 
 If you come from the atmospheric remote sensing community, you may find this dataset interesting because:
@@ -46,7 +46,12 @@ Data is sampled randomly from 11/27/2007 to 12/2/2009, as this is the intersecti
 
 ### Input
 
-Input comes from the [POLDER](https://www.eorc.jaxa.jp/ADEOS/Project/Polder.html) sensor on the [PARASOL](https://www.icare.univ-lille.fr/parasol/mission/) satellite. Input arrays are formatted as 100x100 patches, which are equirectangular projections centered on the patch center. Each pixel has up to 16 different angles, each with 18 values, resulting in 288 image channels per pixel. Ground sample distance is approximately 6 km. Note: angles are imaged at different times, and clouds may drift between angles. Due to the high ground sample distance, this drift should rarely exceed 1 or 2 pixels.
+Input comes from the [POLDER](https://www.eorc.jaxa.jp/ADEOS/Project/Polder.html) sensor on the [PARASOL](https://www.icare.univ-lille.fr/parasol/mission/) satellite. Input arrays are formatted as 100x100 patches, which are equirectangular projections centered on the patch center. Ground sample distance is approximately 6 km. Note: angles are imaged at different times, and clouds may drift between angles. Due to the high ground sample distance, this drift should rarely exceed 1 or 2 pixels.
+
+Each pixel contains normalized reflectance values for 9 different spectral bands: 443, 490, 565, 670, 763, 765, 865, 910, 1020. In addition, the bands 490, 670, and 865 contain polarization information, represented as the Q, U values of the [Stokes parameterization](https://en.wikipedia.org/wiki/Stokes_parameters). Finally, there are three geometric values: relative azimuth angle, solar zenith angle, and view zenith angle, giving 18 total values, per angle, per pixel. With 16 angles and 18 values, inputs have a total of 288 channels. At inference time, model inputs have shape:
+```
+input_shape = (batch_size, num_channels=288, height=100, width=100)
+```
 
 Some examples images are shown below. These images are averaged over the 4 central angles, interpolated to simulate true color, and max-min normalized:
 
@@ -56,9 +61,17 @@ Some examples images are shown below. These images are averaged over the 4 centr
 
 Outputs are not hand-labeled, and instead come from the [CloudSat](https://cloudsat.atmos.colostate.edu/) satellite. More specifically, we source the data from 2 [CALTRACK](https://www.icare.univ-lille.fr/calxtract/) products: [2B-CLDCLASS](http://www.cloudsat.cira.colostate.edu/data-products/level-2b/2b-cldclass) (vertical cloud profiles), and CALTRACK-5km_PAR-RB2 (from the [CALIPSO](https://www-calipso.larc.nasa.gov/) mission) for time synchronization.
 
+Semantic segmentation involves predicting the class-membership mask of a single 'layer' of an image. However, our dataset contains vertical cloud profiles over 125 altitude bins. You can think of this as asking the network to simultaneously perform 125 (highly correlated) semantic segmentation tasks.
+
 There are two main limitations of these outputs.
 1. Since CloudSat's radar only acquires vertical cloud profiles in a narrow band, the output is only defined for a sparse set of locations in the input grid. This tends to look like a line running (mostly) through the input image from north to south. We constrain sampled locations so that there are at least 10 pixels between the output locations and the east/west borders of the image.
 2. There is a temporal delay between POLDER and CLDCLASS measurements, so cloud locations may have slightly changed. Temporal offset tends to be within 3 minutes, so only the fastest-moving clouds will drift more than 1 pixel.
+
+At inference time, outputs have shape:
+
+```
+output_shape = (batch_size, num_classes=9, num_altitude_bins=125, height=100, width=100)
+```
 
 An example label is displayed below:
 
@@ -67,6 +80,14 @@ An example label is displayed below:
 The same example, displayed over its associated image. The green line shows the set of points for which we have supervision:
 
 ![3D in/out viz](/figs/3d_cloud_viz.png)
+
+Ground truth is only defined on a sparse set of locations, with varying amounts of labeled locations per image. Additionally, these locations are not quantized to the same grid as the input. Therefore, before applying the loss function, we interpolate and reshape the output:
+
+```
+interpolated_shape = (num_pixels_in_batch, num_classes=9, num_altitude_bins=125)
+```
+
+Note: the interpolation function is differentiable, allowing the gradient to backpropagate to our model.
 
 ----------------------------------------------------------------
 ## Models
