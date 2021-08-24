@@ -59,7 +59,7 @@ Some examples images are shown below. These images are averaged over the 4 centr
 
 ### Output
 
-Outputs are not hand-labeled, and instead come from the [CloudSat](https://cloudsat.atmos.colostate.edu/) satellite. More specifically, we source the data from 2 [CALTRACK](https://www.icare.univ-lille.fr/calxtract/) products: [2B-CLDCLASS](http://www.cloudsat.cira.colostate.edu/data-products/level-2b/2b-cldclass) (vertical cloud profiles), and CALTRACK-5km_PAR-RB2 (from the [CALIPSO](https://www-calipso.larc.nasa.gov/) mission) for time synchronization.
+Outputs are not hand-labeled, and instead come from the [CloudSat](https://cloudsat.atmos.colostate.edu/) satellite. More specifically, we source the data from a [CALTRACK](https://www.icare.univ-lille.fr/calxtract/) product: [2B-CLDCLASS](http://www.cloudsat.cira.colostate.edu/data-products/level-2b/2b-cldclass) (vertical cloud profiles). The CloudSat data in this product are already time-synchronized with [CALIPSO](https://www-calipso.larc.nasa.gov/), therefore we use another CALTRACK product which contains time offsets between PARASOL and CALIPSO in order to ensure the records match within a maximum time offset threshold of 10 minutes.
 
 Semantic segmentation involves predicting the class-membership mask of a single 'layer' of an image. However, our dataset contains vertical cloud profiles over 125 altitude bins. You can think of this as asking the network to simultaneously perform 125 (highly correlated) semantic segmentation tasks.
 
@@ -106,7 +106,9 @@ Note: the interpolation function is differentiable, allowing the gradient to bac
         conda activate atrain
         python -m pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable.html
 
-3. Download and extract the dataset (WIP: download server under construction)
+3. Download and extract the dataset. You can download the dataset from [this (temporary) link](https://drive.google.com/file/d/1enZITkob80CocfINCTMUmXga8LEwOYzf/view?usp=sharing). Once you have the dataset downloaded, you can extract it with:
+
+        tar -xzf <path/to/the/downloaded/file> -C <path/to/where/you/want/the/dataset>
 
 4. Make the data and experiments directories, plus make a symbolic link to the dataset directory:
 
