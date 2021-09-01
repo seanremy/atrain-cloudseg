@@ -19,8 +19,6 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from utils.parasol_fields import FIELD_DICT
-
 if "./src" not in sys.path:
     sys.path.insert(0, "./src")  # TO DO: change this once it's a package
 from datasets.atrain import (
@@ -36,6 +34,7 @@ from losses.factory import loss_factory
 from losses.segmentation import SmoothnessPenalty
 from models.single_pixel import SinglePixel
 from models.unet import UNet
+from utils.parasol_fields import FIELD_DICT
 from utils.plotting import get_cloud_mask_viz
 from utils.slurm import init_distrib_slurm
 
@@ -63,15 +62,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mask-only", action="store_true", help="Specify to only predict masks, and not cloud type.")
     parser.add_argument("--no-data-aug", action="store_true", help="Skip data augmentation, for debugging purposes.")
     parser.add_argument("--num-epochs", type=int, default=200, help="Number of epochs to run the experiment for.")
+    parser.add_argument("--num-workers", type=int, default=20, help="Number of workers.")
+    parser.add_argument("--profile", action="store_true", help="Whether or not to use the pytorch profiler.")
     parser.add_argument("--save-frequency", type=int, default=5, help="How often (in epochs) to checkpoint the model.")
-    parser.add_argument("--smoothness", type=int, default=0, help="Weight for the smoothness penalty.")
+    parser.add_argument("--smoothness", type=float, default=0, help="Weight for the smoothness penalty.")
     parser.add_argument("--squash-bins", action="store_true", help="Squash the height bins into a binary mask.")
     args = parser.parse_args()
     args.angles_to_omit = args.angles_to_omit.split(",")
-    if "" in args.angles_to_omit:
-        args.angles_to_omit.remove("")
+    args.angles_to_omit = [int(a) for a in args.angles_to_omit if a != ""]
     for angle in args.angles_to_omit:
         assert angle >= 0 and angle < 16
+    assert args.arch in ["unet", "single_pixel"]
     assert args.base_depth > 0
     assert args.batch_size > 1
     assert args.eval_frequency > 0
@@ -126,6 +127,7 @@ def run_epoch(
     dloader: DataLoader,
     writer: SummaryWriter,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
+    profiler: torch.profiler.profile,
     epoch: int,
     args: argparse.Namespace,
 ) -> tuple[dict, torch.Tensor]:
@@ -161,8 +163,12 @@ def run_epoch(
     cls_weight = None
     if not args.dont_weight_loss:
         # effective sample number class weighting: https://arxiv.org/abs/1901.05555
-        cc = dloader.dataset.split["train_counts"]["cls_counts"]
-        if args.mask_only:
+        tc = dloader.dataset.split["train_counts"]
+        cc = tc["cls_counts"]
+        if args.squash_bins:
+            percent_cloudy = tc["mask_count"] / tc["total_pixels"]
+            cc = [1 - percent_cloudy, percent_cloudy]
+        elif args.mask_only:
             cc = [cc[0], sum(cc[1:])]
         total = sum(cc)
         beta = (total - 1) / total
@@ -212,6 +218,8 @@ def run_epoch(
             # loss_total.backward()
             loss.backward()
             optimizer.step()
+        if args.profile:
+            profiler.step()
 
         correct = pred_classes == y  # count of correct predictions
         cls_accs = []  # store per-class accuracy
@@ -234,7 +242,7 @@ def run_epoch(
         desc_list = [
             f"Avg {mode.capitalize()} Loss={stats[0] / stats[2]:.3f}",
             f"Mean {mode.capitalize()} Acc={stats[1] / stats[2]:.3f}",
-        ]
+        ] + [f"size: {batch['input']['sensor_input'].size()}"]
         pbar.set_description("  |  ".join(desc_list))
 
         writer.add_scalar(f"{mode} loss", loss_total, epoch * len(dloader) + batch_idx + 1)
@@ -275,7 +283,6 @@ def make_exp_dir(args: argparse.Namespace) -> None:
     if not os.path.exists(exp_dir):
         os.makedirs(exp_dir)
         json.dump(vars(args), open(os.path.join(exp_dir, "args.json"), "w"))
-    os.makedirs(os.path.join(exp_dir, "tensorboard"), exist_ok=True)
     os.makedirs(os.path.join("data", "checkpoints", args.exp_name), exist_ok=True)
 
 
@@ -342,7 +349,7 @@ def main():
         ),
         collate_fn=collate_atrain,
         drop_last=True,
-        num_workers=4,
+        num_workers=args.num_workers,
     )
     val_loader = DataLoader(
         atrain_val,
@@ -351,7 +358,7 @@ def main():
             dataset=atrain_val, num_replicas=world_size, rank=world_rank
         ),
         collate_fn=collate_atrain,
-        num_workers=4,
+        num_workers=args.num_workers,
     )
     metric_list = MASK_ONLY_METRICS if args.mask_only else ALL_METRICS
 
@@ -359,6 +366,14 @@ def main():
     tensorboard_dir = os.path.join("data", "tensorboard", f"{args.exp_name}_{now_str}")
     os.makedirs(tensorboard_dir)
     writer = SummaryWriter(tensorboard_dir)
+    profiler = None
+    if args.profile:
+        profiler = torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=2, warmup=2, active=6, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(tensorboard_dir),
+            record_shapes=True,
+            with_stack=True,
+        )
 
     in_channels = len(atrain_train.multi_angle_idx)
     out_channels = 125 * 9
@@ -394,8 +409,10 @@ def main():
         tqdm.write(f"\n\n===== Epoch {epoch+1:3d}/{args.num_epochs:3d} =====")
         tqdm.write(f"learning rate: {lr:.2e}\n")
 
-        _, train_stats = run_epoch("train", model, optimizer, train_loader, writer, scheduler, epoch, args)
-        val_predictions, val_stats = run_epoch("val", model, optimizer, val_loader, writer, scheduler, epoch, args)
+        _, train_stats = run_epoch("train", model, optimizer, train_loader, writer, scheduler, profiler, epoch, args)
+        val_predictions, val_stats = run_epoch(
+            "val", model, optimizer, val_loader, writer, scheduler, profiler, epoch, args
+        )
         val_metrics = None
         if distrib.get_rank() == 0 and (epoch + 1) % args.eval_frequency == 0:
             val_metrics = atrain_val.evaluate(val_predictions, metric_list)
