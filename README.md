@@ -155,10 +155,7 @@ After generating the dataset, you still need generate one or more train/val spli
 ----------------------------------------------------------------
 ## Contributing
 
-Feel free to open issues or contribute a pull request to this project! I appreciate any help. If you do wish to contribute, please do the following:
-1. Set up [pre-commit](https://pre-commit.com/).
-
-2. Run `pytest` from the root directory to test. If adding new functionality which isn't covered by existing test cases, please add unit tests in the `test` directory.
+Feel free to open issues or contribute a pull request to this project! I appreciate any help. If you do wish to contribute, please set up [pre-commit](https://pre-commit.com/).
 
 ----------------------------------------------------------------
 ## Acknowledgements
