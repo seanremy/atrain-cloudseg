@@ -7,6 +7,7 @@ import os
 import pickle
 import random
 import sys
+from collections import defaultdict
 from typing import Callable
 
 import numpy as np
@@ -16,16 +17,8 @@ from torch.utils.data import Dataset
 
 if "./src" not in sys.path:
     sys.path.insert(0, "./src")  # TO DO: change this once it's a package
+from datasets.metrics import get_metrics_func
 from datasets.normalization import ATRAIN_MEANS, ATRAIN_STDS
-
-ALL_METRICS = [
-    "cloud_mask_accuracy",
-    "cloud_scenario_accuracy",
-    "cloudtop_height_bin_accuracy",
-    "cloudtop_height_bin_offset_error",
-]
-MASK_ONLY_METRICS = ["cloud_mask_accuracy", "cloudtop_height_bin_accuracy", "cloudtop_height_bin_offset_error"]
-SQUASH_BINS_METRICS = ["cloud_mask_accuracy"]
 
 
 class ATrain(Dataset):
@@ -34,6 +27,7 @@ class ATrain(Dataset):
     def __init__(
         self,
         mode: str,
+        task: str,
         angles_to_omit: list = [],
         fields: list = [],
         get_nondir: bool = False,
@@ -44,6 +38,7 @@ class ATrain(Dataset):
 
         Args:
             mode: Which mode to use for training. In the default split, this must be 'train' or 'val'.
+            task: Which task to use this dataset for.
             fields: List of fields to get in this dataset.
             get_nondir: Get non-directional fields for each instance. Considerably slows down data loading. Defaults to
                         False.
@@ -53,6 +48,8 @@ class ATrain(Dataset):
         super().__init__()
         assert all([a >= 0 and a < 16 for a in angles_to_omit])
         self.mode = mode
+        self.task = task
+        self.metrics_func = get_metrics_func(self.task)
         self.angles_to_omit = angles_to_omit
         self.num_angles = 16 - len(angles_to_omit)
         self.fields = [list(f) for f in fields]
@@ -93,36 +90,17 @@ class ATrain(Dataset):
         self.multi_angle_idx = np.array(self.multi_angle_idx)
         self.nondir_idx = np.array(self.nondir_idx)
 
+        # get indices to image channels vs geometry channels
+        f_ang = [f for f in self.fields for _ in range(self.num_angles)]
+        is_img_c = lambda f: f[0] == "Data_Directional_Fields" and f[1][0] in ["I", "Q", "U"] and f[1][-1] == "P"
+        self.img_channel_idx = [i for i in range(len(f_ang)) if is_img_c(f_ang[i])]
+        self.geom_channel_idx = [i for i in range(len(f_ang)) if not is_img_c(f_ang[i])]
+        is_sin_c = lambda f: f[1] in ["thetas", "thetav"]  # solar zenith angle, view zenith angle
+        self.sin_channel_idx = [i for i in range(len(f_ang)) if is_sin_c(f_ang[i])]  # channels we want to apply sin to
+
     def __len__(self) -> int:
         """Get the length of this dataset."""
         return self.len
-
-    def _patch_idx_to_interp(self, patch_idx: tuple[np.array, np.array]) -> tuple[np.array, np.array]:
-        """Convert the patch index to interpolation corners / weights to apply to model output.
-
-        Args:
-            patch_idx: A tuple of numpy arrays for the y- and x- coordinates of output values in the input array.
-
-        Returns:
-            interp_corners: The locations of corners to use for interpolation
-            interp_weights: The weights for these corners, summing to 1 for each box
-        """
-        idx_y, idx_x = patch_idx
-
-        top_bottom = np.stack([np.floor(idx_y).astype(int), np.ceil(idx_y).astype(int)], axis=1)
-        left_right = np.stack([np.floor(idx_x).astype(int), np.ceil(idx_x).astype(int)], axis=1)
-
-        topleft = np.stack([top_bottom[:, 0], left_right[:, 0]], axis=1)
-        topright = np.stack([top_bottom[:, 0], left_right[:, 1]], axis=1)
-        bottomleft = np.stack([top_bottom[:, 1], left_right[:, 0]], axis=1)
-        bottomright = np.stack([top_bottom[:, 1], left_right[:, 1]], axis=1)
-
-        interp_corners = np.stack([topleft, topright, bottomleft, bottomright], axis=1)
-        weight_y = 1 - np.abs(interp_corners[:, :, 0] - np.stack([idx_y] * 4, axis=1))
-        weight_x = 1 - np.abs(interp_corners[:, :, 1] - np.stack([idx_x] * 4, axis=1))
-        interp_weights = np.expand_dims(weight_y * weight_x, axis=2)
-
-        return interp_corners, interp_weights
 
     def __getitem__(self, idx: int) -> dict:
         """Get the item at the specified index."""
@@ -130,13 +108,19 @@ class ATrain(Dataset):
         inst = self.instance_info[inst_id]
         parasol_arr = np.load(os.path.join(self.dataset_root, inst["input_path"]))
         input_arr = parasol_arr[:, :, self.multi_angle_idx]
-        input_arr = np.transpose(np.clip(input_arr, 0, 1), (2, 0, 1))
+        # clip the image channels between 0 and 1
+        input_arr[:, :, self.img_channel_idx] = np.clip(input_arr[:, :, self.img_channel_idx], 0, 1)
+        # get the geometry mask and add it as a feature
+        if len(self.geom_channel_idx) > 0:
+            geom_mask = input_arr[:, :, self.geom_channel_idx[0]] != -32767
+            input_arr = np.concatenate([input_arr, np.expand_dims(geom_mask, axis=2)], axis=2)
+        input_arr[input_arr == -32767] = 0
+        if len(self.sin_channel_idx) > 0:
+            input_arr[:, :, self.sin_channel_idx] = np.sin(np.pi * input_arr[:, :, self.sin_channel_idx] / 180)
+        # put channel dimension first
+        input_arr = np.transpose(input_arr, (2, 0, 1))
         output_dict = pickle.load(open(os.path.join(self.dataset_root, inst["output_path"]), "rb"))
-        assert inst_id == output_dict.pop("instance_id")
-
-        patch_idx = output_dict.pop("patch_idx")
-        interp_corners, interp_weights = self._patch_idx_to_interp(patch_idx)  # (p, 4, 3)
-
+        interp_corners, interp_weights = output_dict.pop("corner_idx"), output_dict.pop("corner_weights")
         cloud_scenario_flags = output_dict.pop("cloud_scenario")
         cloud_scenario = cloud_scenario_flags.pop("cloud_scenario")  # (p, 125)
 
@@ -166,21 +150,19 @@ class ATrain(Dataset):
 
         return item
 
-    def evaluate(self, predictions: dict, metrics: list[str] = ALL_METRICS) -> dict:
+    def evaluate(self, predictions: dict) -> dict:
         """Evaluate a set of predictions w.r.t. a set of metrics on this dataset.
 
         Args:
             predictions: The predictions to evaluate.
-            metrics: The list of metrics to evaluate.
 
         Returns:
             metrics: The metrics' evaluations on the provided predictions.
         """
-        metrics = {m: [] for m in metrics}
+        metrics = {"instance_metrics": {}, "overall_metrics": {}}
+
+        # collect per-instance metrics
         for inst_id in self.instance_ids:
-            if inst_id not in predictions:
-                for m in metrics:
-                    metrics[m].append(0)
 
             inst = self.instance_info[inst_id]
             pred = predictions[inst_id]
@@ -188,43 +170,43 @@ class ATrain(Dataset):
             gt_labels = pickle.load(open(os.path.join(self.dataset_root, inst["output_path"]), "rb"))
             gt_cloud_scenario = gt_labels["cloud_scenario"]["cloud_scenario"]
 
-            # if we're squashing bins
-            if pred.shape[1] == 1:
-                gt_cloud_scenario = np.sum(gt_cloud_scenario, axis=1, keepdims=True) > 0
+            inst_metrics = self.metrics_func(gt_cloud_scenario, pred)
 
-            gt_cloud_mask = (gt_cloud_scenario > 0).any(axis=1)
-            pred_cloud_mask = (pred > 0).any(axis=1)
+            # treat the altitude metrics as their own separate tasks
+            tasks = list(inst_metrics.keys())
+            for task in tasks:
+                if "altitude_metrics" in inst_metrics[task]:
+                    alt_metrics = inst_metrics[task].pop("altitude_metrics")
+                    for alt_idx in range(len(alt_metrics)):
+                        inst_metrics[f"alt_{alt_idx}_{task[:-3]}_2d"] = alt_metrics[alt_idx]
 
-            def _min(a):
-                if a.shape[0] == 0:
-                    return -1
-                return np.min(a)
+            metrics["instance_metrics"][inst_id] = inst_metrics
 
-            h_bins_pred = np.array([_min(np.where(pred[i].cpu().detach().numpy())[0]) for i in range(pred.shape[0])])
-            h_bins_gt = np.array([_min(np.where(gt_cloud_scenario[i])[0]) for i in range(gt_cloud_scenario.shape[0])])
+            for task in inst_metrics:
+                if task not in metrics["overall_metrics"]:
+                    metrics["overall_metrics"][task] = {}
+                if "2d" in task:
+                    arr_size = inst_metrics[task].pop("num_pixels")
+                else:
+                    arr_size = inst_metrics[task].pop("num_voxels")
 
-            if "cloud_mask_accuracy" in metrics:
-                # cloud mask accuracy := proportion of pixels correctly identified as cloud / not cloud
-                metrics["cloud_mask_accuracy"].append(np.mean(gt_cloud_mask == pred_cloud_mask.cpu().detach().numpy()))
+                for metric in inst_metrics[task]:
+                    if metric not in metrics["overall_metrics"][task]:
+                        metrics["overall_metrics"][task][metric] = [0, 0]
+                    if metric in ["true_positives", "false_positives", "false_negatives", "true_negatives"]:
+                        metrics["overall_metrics"][task][metric][0] += inst_metrics[task][metric]
+                        metrics["overall_metrics"][task][metric][1] = 1
+                    else:
+                        metrics["overall_metrics"][task][metric][0] += inst_metrics[task][metric] * arr_size
+                        metrics["overall_metrics"][task][metric][1] += arr_size
 
-            if "cloud_scenario_accuracy" in metrics:
-                # cloud scenario accuracy := proportion of pixel + height bin combinations whose cloud scenario is
-                #   correctly identified
-                metrics["cloud_scenario_accuracy"].append(np.mean(gt_cloud_scenario == pred.cpu().detach().numpy()))
+        # aggregate overall metrics
+        for task in metrics["overall_metrics"]:
+            for metric in metrics["overall_metrics"][task]:
+                m = metrics["overall_metrics"][task][metric]
+                m = m[0] / m[1]
+                metrics["overall_metrics"][task][metric] = m
 
-            if "cloudtop_height_bin_accuracy" in metrics:
-                # cloud-top height bin accuracy := proportion of pixels whose highest cloud bin is correctly identified
-                metrics["cloudtop_height_bin_accuracy"].append(np.mean(h_bins_pred == h_bins_gt))
-
-            if "cloudtop_height_bin_offset_error" in metrics:
-                # cloud-top height bin offset := average distance between predicted and GT cloud-top height, only
-                #   computed for points pixels where both prediction and GT have clouds
-                both_clouds = pred_cloud_mask.cpu().detach().numpy() * gt_cloud_mask
-                height_bin_offsets = np.abs(h_bins_pred[both_clouds] - h_bins_gt[both_clouds])
-                metrics["cloudtop_height_bin_offset_error"].append(np.mean(height_bin_offsets))
-
-        metrics["instance_ids"] = list(self.instance_info.keys())
-        metrics = {k: np.array(v) for k, v in metrics.items()}
         return metrics
 
 
@@ -337,20 +319,38 @@ def interp_atrain_output(batch: dict, out: torch.Tensor) -> torch.Tensor:
     return out_interp
 
 
-def get_norm_transform(multi_angle_idx: list) -> Callable:
-    """Normalization transform. Normalizes sensor input by the A-Train means and standard deviations."""
-    means = ATRAIN_MEANS[multi_angle_idx]
-    stds = ATRAIN_STDS[multi_angle_idx]
+def get_norm_transform(img_channel_idx: list, multi_angle_idx: list) -> Callable:
+    """Normalization transform. Normalizes sensor input by the A-Train means and standard deviations.
+
+    Args:
+        img_channel_idx: Index to the image channels in the multi angle index.
+        multi_angle_idx: The multi angle index into the PARASOL fields.
+
+    Returns:
+        norm_transform: A function that normalizes a batch.
+    """
+    multi_angle_img_idx = multi_angle_idx[img_channel_idx]
+    means = ATRAIN_MEANS[multi_angle_img_idx]
+    stds = ATRAIN_STDS[multi_angle_img_idx]
 
     def norm_transform(batch: dict) -> dict:
-        batch["input"]["sensor_input"] = TF.normalize(batch["input"]["sensor_input"], means, stds)
+        batch["input"]["sensor_input"][:, img_channel_idx] = TF.normalize(
+            batch["input"]["sensor_input"][:, img_channel_idx], means, stds
+        )
         return batch
 
     return norm_transform
 
 
 def random_hflip(batch: dict) -> dict:
-    """Random horizontal flip trnasform. Also flips the interpolation corners."""
+    """Random horizontal flip transform. Also flips the interpolation corners.
+
+    Args:
+        batch: A batch to transform.
+
+    Returns:
+        batch: The transformed batch.
+    """
     if random.random() > 0.5:
         batch["input"]["sensor_input"] = TF.hflip(batch["input"]["sensor_input"])
         w = batch["input"]["sensor_input"].shape[-1]
@@ -361,7 +361,14 @@ def random_hflip(batch: dict) -> dict:
 
 
 def random_vflip(batch: dict) -> dict:
-    """Random vertical flip trnasform. Also flips the interpolation corners."""
+    """Random vertical flip trnasform. Also flips the interpolation corners.
+
+    Args:
+        batch: A batch to transform.
+
+    Returns:
+        batch: The transformed batch.
+    """
     if random.random() > 0.5:
         batch["input"]["sensor_input"] = TF.vflip(batch["input"]["sensor_input"])
         h = batch["input"]["sensor_input"].shape[-2]
@@ -371,17 +378,19 @@ def random_vflip(batch: dict) -> dict:
     return batch
 
 
-def get_transforms(mode: str, multi_angle_idx: list) -> list:
+def get_transforms(mode: str, img_channel_idx: list, multi_angle_idx: list) -> list:
     """Get the list of transforms for either 'train' or 'val'.
 
     Args:
         mode: Specifies 'train' or 'val'.
+        img_channel_idx: Index to image features.
+        multi_angle_idx: Index to multi-angle features.
 
     Returns:
         transforms: The list of transform functions.
     """
     if mode == "train":
-        transforms = [get_norm_transform(multi_angle_idx), random_hflip, random_vflip]
+        transforms = [get_norm_transform(img_channel_idx, multi_angle_idx), random_hflip, random_vflip]
     elif mode == "val":
-        transforms = [get_norm_transform(multi_angle_idx)]
+        transforms = [get_norm_transform(img_channel_idx, multi_angle_idx)]
     return transforms

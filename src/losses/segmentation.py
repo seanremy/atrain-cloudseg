@@ -64,7 +64,7 @@ class CrossEntropyLoss(BaseLoss):
     For the math, see: https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html
     """
 
-    def __init__(self, num_height_bins: int, num_classes: int, weight=None) -> None:
+    def __init__(self, num_height_bins: int, num_classes: int, weight: torch.Tensor = None) -> None:
         """Create a Cross Entropy Loss.
 
         Args:
@@ -100,7 +100,7 @@ class FocalLoss(BaseLoss):
     """
 
     def __init__(
-        self, num_height_bins: int, num_classes: int, alpha: float = 0.5, gamma: float = 2, weight=None
+        self, num_height_bins: int, num_classes: int, alpha: float = 0.5, gamma: float = 2, weight: torch.Tensor = None
     ) -> None:
         """Create a Focal Loss.
 
@@ -168,13 +168,12 @@ class SoftJaccardLoss(BaseLoss):
         return loss
 
 
-# TO DO: implement Filtered Jaccard Loss from Cloud-Net+
-# TO DO: implement image-gradient-modulated L1 regularization penalty on the output gradient, as in:
-#   Learning Depth with Very Sparse Supervision, Loquercio et. al
-
-
 class SmoothnessPenalty(nn.Module):
-    """TO DO"""
+    """L1 regularization penalty on the output gradient (note: xy gradient, not gradient in the ML sense) of the
+    predictions, modulated by the input image's gradient.
+
+    See (2) from: https://arxiv.org/abs/2003.00752
+    """
 
     def __init__(self) -> None:
         """Create a Smoothness Penalty.
@@ -185,26 +184,27 @@ class SmoothnessPenalty(nn.Module):
         """
         super(SmoothnessPenalty, self).__init__()
 
-    def forward(self, out: torch.Tensor, batch: dict) -> torch.Tensor:
+    def forward(self, out: torch.Tensor, batch: dict, c_idx: list) -> torch.Tensor:
         """Apply the loss to a set of predictions, with respect to a batch containing ground truth.
 
         Args:
             out: Predictions, before interpolation, of shape (batch_size, num_classes * num_height_bins, height, width).
             batch: A batch from the A-Train dataset.
+            c_idx: The index of which channels correspond to images (as opposed to geometry / geography).
 
         Returns:
             loss: The smoothness penalty of the predictions with respect to this batch.
         """
-        img = batch["input"]["sensor_input"]
+        img = batch["input"]["sensor_input"][:, c_idx]
         grad_x_filter = torch.Tensor([[1, 0, -1]]).to(img.device).view(1, 1, 1, 3)
         grad_y_filter = torch.Tensor([[1], [0], [-1]]).to(img.device).view(1, 1, 3, 1)
 
         def get_grad(x, w):
             grad_list = [F.conv2d(x[:, i : i + 1, :, :], w, padding="same") for i in range(x.size(1))]
-            return torch.abs(torch.cat(grad_list, dim=1)).mean(dim=1, keepdim=True)
+            return torch.abs(torch.cat(grad_list, dim=1))
 
-        img_grad_x = get_grad(img, grad_x_filter)
-        img_grad_y = get_grad(img, grad_y_filter)
+        img_grad_x = get_grad(img, grad_x_filter).mean(dim=1, keepdim=True)
+        img_grad_y = get_grad(img, grad_y_filter).mean(dim=1, keepdim=True)
         out_grad_x = get_grad(out, grad_x_filter)
         out_grad_y = get_grad(out, grad_y_filter)
         loss = (out_grad_x * torch.exp(-img_grad_x) + out_grad_y * torch.exp(-img_grad_y)).mean()

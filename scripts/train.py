@@ -1,4 +1,5 @@
-"""TO DO
+"""Train a model on the A-Train dataset. This script is written to use SLURM and multiple GPUs. A simpler training
+script is a work in progress.
 
 Some code borrowed from: https://github.com/erikwijmans/skynet-ddp-slurm-example
 """
@@ -21,19 +22,10 @@ from tqdm import tqdm
 
 if "./src" not in sys.path:
     sys.path.insert(0, "./src")  # TO DO: change this once it's a package
-from datasets.atrain import (
-    ALL_METRICS,
-    MASK_ONLY_METRICS,
-    SQUASH_BINS_METRICS,
-    ATrain,
-    collate_atrain,
-    get_transforms,
-    interp_atrain_output,
-)
+from datasets.atrain import ATrain, collate_atrain, get_transforms, interp_atrain_output
 from losses.factory import loss_factory
 from losses.segmentation import SmoothnessPenalty
-from models.single_pixel import SinglePixel
-from models.unet import UNet
+from models.factory import model_factory
 from utils.parasol_fields import FIELD_DICT
 from utils.plotting import get_cloud_mask_viz
 from utils.slurm import init_distrib_slurm
@@ -50,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--angles-to-omit", type=str, default="", help="Comma-separated list of angles to omit.")
-    parser.add_argument("--arch", type=str, default="unet", help="Which model architecture to use.")
+    parser.add_argument("--arch", type=str, default="unet_2d", help="Which model architecture to use.")
     parser.add_argument("--base-depth", type=int, default=64, help="Base depth for the U-Net model.")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size to use for training and validation.")
     parser.add_argument("--dont-weight-loss", action="store_true", help="Don't class-weight the loss function.")
@@ -59,29 +51,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fields", type=str, default="directional", help="Which fields to use as input.")
     parser.add_argument("--learning-rate", type=float, default=1e-3, help="Starting learning rate.")
     parser.add_argument("--loss", type=str, default="cross-entropy", help="Which loss function to use.")
-    parser.add_argument("--mask-only", action="store_true", help="Specify to only predict masks, and not cloud type.")
     parser.add_argument("--no-data-aug", action="store_true", help="Skip data augmentation, for debugging purposes.")
+    parser.add_argument("--num-blocks", type=int, default=-1, help="Number of blocks in the model.")
     parser.add_argument("--num-epochs", type=int, default=200, help="Number of epochs to run the experiment for.")
     parser.add_argument("--num-workers", type=int, default=20, help="Number of workers.")
     parser.add_argument("--profile", action="store_true", help="Whether or not to use the pytorch profiler.")
     parser.add_argument("--save-frequency", type=int, default=5, help="How often (in epochs) to checkpoint the model.")
     parser.add_argument("--smoothness", type=float, default=0, help="Weight for the smoothness penalty.")
-    parser.add_argument("--squash-bins", action="store_true", help="Squash the height bins into a binary mask.")
+    parser.add_argument("--task", type=str, default="bin_seg_3d", help="Which task to perform.")
     args = parser.parse_args()
     args.angles_to_omit = args.angles_to_omit.split(",")
     args.angles_to_omit = [int(a) for a in args.angles_to_omit if a != ""]
     for angle in args.angles_to_omit:
         assert angle >= 0 and angle < 16
-    assert args.arch in ["unet", "single_pixel"]
+    assert args.arch in model_factory
     assert args.base_depth > 0
     assert args.batch_size > 1
     assert args.eval_frequency > 0
     assert args.fields in FIELD_DICT
     assert args.learning_rate > 0
     assert args.loss in loss_factory
+    assert args.num_blocks < 0 or args.arch.startswith("unet")
     assert args.num_epochs > 0
-    if args.squash_bins:
-        args.mask_only = True
+    assert args.task in ["seg_3d", "bin_seg_3d", "bin_seg_2d"]
     return args
 
 
@@ -156,7 +148,7 @@ def run_epoch(
 
     device = next(model.parameters()).device
     context = nullcontext() if mode == "train" else torch.no_grad()
-    transforms = get_transforms(mode, dloader.dataset.multi_angle_idx)
+    transforms = get_transforms(mode, dloader.dataset.img_channel_idx, dloader.dataset.multi_angle_idx)
     if args.no_data_aug:
         transforms = transforms[:1]  # if no aug, keep only the normalization
 
@@ -165,10 +157,10 @@ def run_epoch(
         # effective sample number class weighting: https://arxiv.org/abs/1901.05555
         tc = dloader.dataset.split["train_counts"]
         cc = tc["cls_counts"]
-        if args.squash_bins:
+        if args.task == "bin_seg_2d":
             percent_cloudy = tc["mask_count"] / tc["total_pixels"]
             cc = [1 - percent_cloudy, percent_cloudy]
-        elif args.mask_only:
+        elif args.task == "bin_seg_3d":
             cc = [cc[0], sum(cc[1:])]
         total = sum(cc)
         beta = (total - 1) / total
@@ -177,7 +169,7 @@ def run_epoch(
         cls_weight = torch.Tensor(cls_weight).cuda()
 
     objective = loss_factory[args.loss](
-        125 if not args.squash_bins else 1, 9 if not args.mask_only else 2, weight=cls_weight
+        125 if args.task in ["seg_3d", "bin_seg_3d"] else 1, 9 if args.task == "seg_3d" else 2, weight=cls_weight
     )
     penalty = SmoothnessPenalty()
 
@@ -192,9 +184,9 @@ def run_epoch(
         for t in transforms:
             batch = t(batch)
 
-        if args.squash_bins:
+        if args.task == "bin_seg_2d":
             batch["output"]["cloud_scenario"] = batch["output"]["cloud_scenario"].any(dim=1, keepdim=True)
-        elif args.mask_only:
+        elif args.task == "bin_seg_3d":
             batch["output"]["cloud_scenario"] = batch["output"]["cloud_scenario"] > 0
 
         x = batch["input"]["sensor_input"]
@@ -203,37 +195,41 @@ def run_epoch(
         with context:
             out = model(x)
             out_interp = interp_atrain_output(batch, out)
-            if args.mask_only:
+            if args.task in ["bin_seg_2d", "bin_seg_3d"]:
                 pred_classes = out_interp > 0.5  # since our objective is based on (1 - mask, mask)
                 out_interp = torch.stack([1 - out_interp, out_interp], dim=2)
             else:
                 pred_classes = torch.argmax(out_interp.view(-1, 9), dim=-1)
             loss = objective(out_interp, batch)  # average loss per pixel, per height bin
             if args.smoothness > 0:
-                loss += args.smoothness * penalty(out, batch)
+                loss += args.smoothness * penalty(out, batch, dloader.dataset.img_channel_idx)
             loss_total = loss * out_interp.numel()  # multiply by num elements to get total loss
 
         if mode == "train":
             optimizer.zero_grad()
-            # loss_total.backward()
-            loss.backward()
+            loss_total.backward()
             optimizer.step()
         if args.profile:
             profiler.step()
 
-        correct = pred_classes == y  # count of correct predictions
-        cls_accs = []  # store per-class accuracy
+        cls_dice_scores = []  # store per-class dice score
         for cls_idx in range(out_interp.shape[-1]):
-            cls_mask = y == cls_idx
-            if not cls_mask.any():
-                cls_accs.append(1)
+            pred_cls = pred_classes == cls_idx
+            y_cls = y == cls_idx
+            tp = (pred_cls * y_cls).sum()
+            fp = (pred_cls * ~y_cls).sum()
+            fn = (~pred_cls * y_cls).sum()
+            dice_denom = 2 * tp + fp + fn
+            if dice_denom == 0:
+                cls_dice_scores.append(1)
             else:
-                cls_accs.append((cls_mask * correct).sum() / cls_mask.sum())
-        cls_accs = torch.stack(cls_accs)
-        mean_acc = cls_accs.mean()
+                cls_dice_scores.append(2 * tp / dice_denom)
+
+        cls_dice_scores = torch.stack(cls_dice_scores)
+        mean_dice = cls_dice_scores.mean()
 
         stats[0] += loss_total
-        stats[1] += mean_acc * y.size(0)
+        stats[1] += mean_dice * y.size(0)
         stats[2] += y.size(0)  # number of pixels in this batch
 
         for i in range(batch["instance_id"].shape[0]):
@@ -241,12 +237,12 @@ def run_epoch(
 
         desc_list = [
             f"Avg {mode.capitalize()} Loss={stats[0] / stats[2]:.3f}",
-            f"Mean {mode.capitalize()} Acc={stats[1] / stats[2]:.3f}",
-        ] + [f"size: {batch['input']['sensor_input'].size()}"]
+            f"Mean {mode.capitalize()} Dice={stats[1] / stats[2]:.3f}",
+        ]
         pbar.set_description("  |  ".join(desc_list))
 
         writer.add_scalar(f"{mode} loss", loss_total, epoch * len(dloader) + batch_idx + 1)
-        writer.add_scalar(f"{mode} acc", mean_acc, epoch * len(dloader) + batch_idx + 1)
+        writer.add_scalar(f"{mode} dice", mean_dice, epoch * len(dloader) + batch_idx + 1)
         if (batch_idx + 1) % viz_freq == 0:
             batch_viz = []
             for i in range(batch["instance_id"].shape[0]):
@@ -266,7 +262,7 @@ def run_epoch(
     if distrib.get_rank() == 0:
         stats[0:2] /= stats[2]
 
-    tqdm.write(f"{mode.capitalize()}: Avg Loss={stats[0].item():.3f}    Acc={stats[1].item():.3f}")
+    tqdm.write(f"{mode.capitalize()}: Avg Loss={stats[0].item():.3f}    Dice={stats[1].item():.3f}")
     if mode == "val":
         scheduler.step(stats[1])
 
@@ -316,13 +312,25 @@ def checkpoint(
     os.makedirs(os.path.join(exp_dir, "stats"), exist_ok=True)
     stats = {k: v.cpu().detach().numpy().tolist() for k, v in stats.items()}
     json.dump(stats, open(os.path.join(exp_dir, "stats", f"epoch_{epoch+1}.json"), "w"))
+
     if not val_metrics is None:
         os.makedirs(os.path.join(exp_dir, "val_metrics"), exist_ok=True)
-        val_metrics = {k: v.tolist() for k, v in val_metrics.items()}
+
+        def _conv_dict(d):
+            for k in d:
+                if type(d[k]) == dict:
+                    d[k] = _conv_dict(d[k])
+                elif type(d[k]) == np.array:
+                    d[k] = d[k].tolist()
+                else:
+                    d[k] = float(d[k])
+            return d
+
+        val_metrics = _conv_dict(val_metrics)
         json.dump(val_metrics, open(os.path.join(exp_dir, "val_metrics", f"epoch_{epoch+1}.json"), "w"))
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     # local_rank, _ = init_distrib_slurm(backend="gloo")
@@ -339,13 +347,16 @@ def main():
 
     make_exp_dir(args)
     fields = FIELD_DICT[args.fields]
-    atrain_train = ATrain("train", angles_to_omit=args.angles_to_omit, fields=fields)
-    atrain_val = ATrain("val", angles_to_omit=args.angles_to_omit, fields=fields)
+    atrain_train = ATrain("train", args.task, angles_to_omit=args.angles_to_omit, fields=fields)
+    atrain_val = ATrain("val", args.task, angles_to_omit=args.angles_to_omit, fields=fields)
     train_loader = DataLoader(
         atrain_train,
         batch_size=args.batch_size,
         sampler=torch.utils.data.distributed.DistributedSampler(
-            dataset=atrain_train, num_replicas=world_size, rank=world_rank
+            dataset=atrain_train,
+            num_replicas=world_size,
+            rank=world_rank,
+            seed=np.random.randint(2 ** 32),
         ),
         collate_fn=collate_atrain,
         drop_last=True,
@@ -360,7 +371,6 @@ def main():
         collate_fn=collate_atrain,
         num_workers=args.num_workers,
     )
-    metric_list = MASK_ONLY_METRICS if args.mask_only else ALL_METRICS
 
     now_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_dir = os.path.join("data", "tensorboard", f"{args.exp_name}_{now_str}")
@@ -375,27 +385,21 @@ def main():
             with_stack=True,
         )
 
-    in_channels = len(atrain_train.multi_angle_idx)
+    # add 1 if we have geometry channels for the geometry mask
+    in_channels = len(atrain_val.multi_angle_idx) + 1 * (len(atrain_val.geom_channel_idx) > 0)
     out_channels = 125 * 9
-    metric_list = ALL_METRICS
-    if args.squash_bins:
+    if args.task == "bin_seg_2d":
         out_channels = 1
-        metric_list = SQUASH_BINS_METRICS
-    elif args.mask_only:
+    elif args.task == "bin_seg_3d":
         out_channels = 125
-        metric_list = MASK_ONLY_METRICS
+    patch_size = atrain_train[0]["input"]["sensor_input"].shape[1:]
 
-    if args.arch == "unet":
-        model = UNet(in_channels, out_channels, args.base_depth, atrain_train[0]["input"]["sensor_input"].shape[1:])
-    elif args.arch == "single_pixel":
-        model = SinglePixel(in_channels, out_channels)
-    else:
-        raise NotImplementedError(f"No implementation for model: {args.arch}")
+    model = model_factory[args.arch](in_channels, out_channels, patch_size, args)
 
     # # Let's use group norm instead of batch norm because batch norm can be problematic if the batch size per GPU gets really small
     # model = convert_groupnorm_model(model, ngroups=min(32, args.batch_size))
-    model = model.to(device)
 
+    model = model.to(device)
     model = torch.nn.parallel.DistributedDataParallel(
         model,
         device_ids=[device],
@@ -415,15 +419,7 @@ def main():
         )
         val_metrics = None
         if distrib.get_rank() == 0 and (epoch + 1) % args.eval_frequency == 0:
-            val_metrics = atrain_val.evaluate(val_predictions, metric_list)
-            tqdm.write("\nMetrics:")
-            for metric, instance_values in val_metrics.items():
-                if metric == "instance_ids":
-                    continue
-                overall_metric = np.mean(instance_values[~np.isnan(instance_values)])
-                tqdm.write(f"{metric[:min(len(metric), 30)]}:\t{overall_metric:.3f}")
-                if not np.isnan(overall_metric):
-                    writer.add_scalar(metric, overall_metric, (epoch + 1))
+            val_metrics = atrain_val.evaluate(val_predictions)
 
         train_loader.sampler.set_epoch(epoch)
 

@@ -1,16 +1,16 @@
 """Utilities for working with data from satellites in the A-train, specifically POLDER, CALIOP, and CloudSat."""
 
-import math
 import os
 import re
-from collections import defaultdict
 from datetime import datetime
+from typing import Tuple
 
 import h5py
 import numpy as np
 from pyhdf.SD import SD, SDC
 from scipy.ndimage.filters import convolve
 from scipy.ndimage.interpolation import map_coordinates
+from scipy.stats import circmean
 
 CLOUD_SCENARIO_INFO = {
     0: {"name": "No cloud", "color": (0, 0, 0)},
@@ -65,6 +65,8 @@ def polder_grid_to_latlon(lin: np.array, col: np.array, rounding: bool = False) 
     lt180, gt180 = lon < -180, lon > 180
     lon[lt180] = lon[lt180] + 360
     lon[gt180] = lon[gt180] - 360
+    assert (-90 <= lat).all() and (lat <= 90).all()
+    assert (-180 <= lon).all() and (lon <= 180).all()
     return lat, lon
 
 
@@ -94,7 +96,9 @@ def latlon_to_polder_grid(lat: np.array, lon: np.array, rounding: bool = False) 
     col = 3240.5 + (n_i / 180) * lon
     if rounding:
         col = np.round(col)
-    lin, col = lin - 1, col - 1  # start at 0
+    # lin, col = lin - 1, col - 1  # start at 0
+    assert (0 <= lin).all() and (lin <= 3240).all()
+    assert (0 <= col).all() and (col <= 6480).all()
     return lin, col
 
 
@@ -126,58 +130,6 @@ def _decode_cloud_scenario(cloud_scenario_arr: np.array) -> dict:
         "precipitation_flag": _get_bits(cloud_scenario_arr, 13, 15),
     }
     return cloud_scenario
-
-
-def _dataset_to_numpy(h5_dataset: h5py._hl.dataset.Dataset, crop: tuple = None) -> tuple[np.array, np.array]:
-    """Convert a dataset from an hdf5 object with geospatial data into a numpy array.
-
-    Args:
-        h5_dataset: The dataset to convert. Needs to have standard attributes for ICARE geospatial data
-        crop: The index and shape of the crop to use, optional
-
-    Returns:
-        arr: The numpy array of physical values of the provided dataset
-        valid_mask: The mask of where the returned physical values are valid
-    """
-    arr = np.array(h5_dataset)
-    if len(arr.shape) < 3:
-        arr = np.expand_dims(arr, axis=2)
-    if not crop is None:
-        crop_idx, crop_shape = crop
-        arr = np.stack([map_coordinates(arr[:, :, i], crop_idx, order=0) for i in range(arr.shape[2])], axis=1)
-        arr = arr.reshape((crop_shape[1], crop_shape[0], arr.shape[1]))
-        arr = np.transpose(arr, (1, 0, 2))
-    valid_mask = arr != h5_dataset.attrs["_FillValue"]
-    if h5_dataset.attrs["Num_missing_value"] > 0:
-        valid_mask = valid_mask * (arr != h5_dataset.attrs["missing_value"])
-    where_valid = np.where(valid_mask)
-    masked_values = arr[where_valid]
-    if h5_dataset.attrs["scale_factor"] != 1:
-        masked_values = masked_values * h5_dataset.attrs["scale_factor"]
-    if h5_dataset.attrs["add_offset"] != 0:
-        masked_values = masked_values + h5_dataset.attrs["add_offset"]
-    arr = arr.astype(masked_values.dtype)
-    arr[where_valid] = masked_values
-    return arr, valid_mask
-
-
-def _crop_to_idx(crop: dict, theta: float = 0) -> tuple[np.array, np.array]:
-    """Convert a crop dictionary to an index.
-
-    Args:
-        crop: A dictionary with top, bottom, left, and right values of a crop window
-        theta: The angle by which the crop's sinusoidal projection is rotated
-    Returns:
-        crop_grid_y: The y-coordinates of the crop index
-        crop_grid_x: The x-coordinates of the crop index
-    """
-    crop_range_y = np.arange(np.floor(crop["top"]), np.ceil(crop["bottom"]))
-    crop_range_x = np.arange(np.floor(crop["left"]), np.ceil(crop["right"]))
-    crop_grid_y, crop_grid_x = [g.flatten() for g in np.meshgrid(crop_range_y, crop_range_x)]
-    crop_grid_lat, crop_grid_lon = polder_grid_to_latlon(crop_grid_y, crop_grid_x)
-    crop_grid_lon = (crop_grid_lon - theta + 180) % 360 - 180
-    crop_grid_y, crop_grid_x = latlon_to_polder_grid(crop_grid_lat, crop_grid_lon)
-    return crop_grid_y, crop_grid_x
 
 
 def tai93_string_to_datetime(tai_time: str) -> datetime:
@@ -269,114 +221,90 @@ class PARASOLScene:
         # read the hdf5 file
         self.h5 = h5py.File(self.filepath, "r")
 
-        # get the full POLDER grid latitude and longitude
-        self.lat_og_arr, self.lat_og_mask = _dataset_to_numpy(self.h5["Geolocation_Fields"]["Latitude"])
-        self.lon_og_arr, self.lon_og_mask = _dataset_to_numpy(self.h5["Geolocation_Fields"]["Longitude"])
-        self.lat_og = self.lat_og_arr[self.lat_og_mask]
-        self.lon_og = self.lon_og_arr[self.lon_og_mask]
+        # where we have enough views
+        nviews, nviews_validity = self.get_valid_values_and_mask(["Data_Fields", "Nviews"])
+        enough_views = nviews >= self.min_views
+        nv_row, nv_col = np.where(nviews_validity)
+        self.view_validity = np.zeros((3240, 6480)).astype(bool)
+        self.view_validity[nv_row[enough_views], nv_col[enough_views]] = True
 
-        # center and crop the scene
-        self._center_and_crop()
+        # store latitude and longitude, and the mask of where they're valid
+        self.lat, self.geo_validity = self.get_valid_values_and_mask(["Geolocation_Fields", "Latitude"])
+        self.lon, _ = self.get_valid_values_and_mask(["Geolocation_Fields", "Longitude"])
+        self.lat, self.lon = self.lat[enough_views], self.lon[enough_views]
 
-        self.field_data = defaultdict(dict)
-        for field in self.fields:
-            self.field_data[field[0]][field[1]], _ = _dataset_to_numpy(
-                self.h5[field[0]][field[1]], (self.crop_idx, self.crop_shape)
-            )
-
-    def _center_and_crop(self) -> None:
-        """Center and crop this PARASOL Scene."""
-        nonpolar = (self.lat_og > -60) * (self.lat_og < 60)
-        lat_nonpolar = self.lat_og[nonpolar]
-        lon_nonpolar = self.lon_og[nonpolar]
-        if np.min(np.abs(self.lon_og - 180)) < 1 or np.min(np.abs(self.lon_og + 180)) < 1:
-            # if we are near the 180 meridian, special midpoint computation
-            lon_shifted = (self.lon_og % 360 - 180)[nonpolar]
-            theta = -(np.max(lon_shifted) + np.min(lon_shifted)) / 2 + 180
-        else:
-            theta = -(np.max(lon_nonpolar) + np.min(lon_nonpolar)) / 2
-        self.theta = (theta + 180) % 360 - 180
-        lon_c = (lon_nonpolar + self.theta + 180) % 360 - 180
-        row, col = latlon_to_polder_grid(lat_nonpolar, lon_c)
-        self.crop = {
-            "left": int(np.round(np.min(col))),
-            "right": int(np.round(np.max(col))) + 1,
-            "top": int(np.round(np.min(row))),
-            "bottom": int(np.round(np.max(row))) + 1,
-        }
-        self.crop_shape = (self.crop["bottom"] - self.crop["top"], self.crop["right"] - self.crop["left"])
-        self.crop_idx = _crop_to_idx(self.crop, self.theta)
-
-    def get_view_validity(self, patch_size: int) -> np.array:
-        """Get the 'view validity' from this scene. The 'view validity' is the mask of all box centers for
-        boxes of size (patch_size, patch_size) where all of the pixels in the box have enough views available.
+    def get_valid_values_and_mask(self, keys) -> Tuple[np.array, np.array]:
+        """Get the valid values and the mask of a dataset in the scene.
 
         Args:
-            patch_size: The size of the patches for which to check validity
+            keys: The list of keys, in order, specifying the location of the dataset in the hdf5 file.
 
         Returns:
-            view_validity: The view validity mask, in the POLDER grid
+            arr: The 1-D array of valid values.
+            mask: The 2-D mask at which the valid values are located.
         """
-        num_views = self.field_data["Data_Fields"]["Nviews"][:, :, 0]
-        views_valid = num_views != self.h5["Data_Fields"]["Nviews"].attrs["_FillValue"]
-        enough_views = ((num_views >= self.min_views) * views_valid).astype(int)
-        filter = np.zeros((1, patch_size)) + 1
-        sum_enough_views = convolve(convolve(enough_views, filter, mode="constant"), filter.T, mode="constant")
-        view_validity = sum_enough_views == (patch_size * patch_size)
-        return view_validity
+        h5 = self.h5
+        for k in keys:
+            h5 = h5[k]
+        arr = np.array(h5)
+        mask = np.ones(arr.shape).astype(bool)
+        if h5.attrs["Num_missing_value"] > 0:
+            mask = mask * (arr != h5.attrs["missing_value"])
+        if h5.attrs["Num_Fill"] > 0:
+            mask = mask * (arr != h5.attrs["_FillValue"])
+        arr = arr[mask]
+        return arr, mask
 
-    def get_patch(self, center_x: int, center_y: int, patch_size: int) -> tuple[np.array, dict]:
-        """Get a square patch in this scene, with a provided center and patch size.
+    def get_polder_grid_mask(self) -> np.array:
+        """Get the mask of which pixels in the POLDER grid (sinusoidal projection) are valid.
+
+        Returns:
+            pg_mask: The POLDER grid validity mask.
+        """
+        pg_mask = np.zeros((3240, 6480)).astype(bool)
+        row_range = np.arange(3240)
+        lat_range = 90 - (row_range + 0.5) / 18
+        n_i = np.round(3240 * np.cos(lat_range * np.pi / 180))
+        for i in range(3240):
+            pg_mask[i, int(np.floor(3240.5 - n_i[i])) : int(np.floor(3240.5 + n_i[i]))] = True
+        return pg_mask
+
+    def get_patch(self, patch: dict) -> np.array:
+        """Get a patch in this scene.
 
         Args:
-            center_x: The x-coordinate of the patch center
-            center_y: The y-coordinate of the patch center
-            patch_size: The side length of the patch square
+            patch: Geographic info on a patch, with row and column locations in the POLDER grid.
+
         Returns:
-            patch_arr: The patch, as an array containing all fields
-            patch_box: A dictionary containing the row space, column space, and size of this patch
+            patch_arr: The patch data as a 3-D array.
         """
-        lat = self.field_data["Geolocation_Fields"]["Latitude"]
-        lon = self.field_data["Geolocation_Fields"]["Longitude"]
-        top, bottom = center_y - (patch_size - 1) // 2, center_y + math.ceil((patch_size - 1) / 2)
-        left, right = center_x - (patch_size - 1) // 2, center_x + math.ceil((patch_size - 1) / 2)
+        patch_data = []
 
-        padding = max(10, patch_size // 4)
-        top_pad = min(padding, top)
-        bottom_pad = min(padding, self.crop_shape[0] - bottom)
-        left_pad = min(padding, left)
-        right_pad = min(padding, self.crop_shape[1] - right)
-        lat_min = lat[bottom, center_x, 0]
-        lat_max = lat[top, center_x, 0]
-        lon_min = (lon[center_y, left, 0] + self.theta + 180) % 360 - 180
-        lon_max = (lon[center_y, right, 0] + self.theta + 180) % 360 - 180
-        lat_space = np.linspace(lat_min, lat_max, patch_size)
-        lon_space = np.linspace(lon_min, lon_max, patch_size)
-        row_space, col_space = latlon_to_polder_grid(lat_space, lon_space)
-
-        row_space = row_space[::-1] - self.crop["top"]
-        col_space = col_space - self.crop["left"]
-        patch_box = {
-            "row_space": row_space,
-            "col_space": col_space,
-            "patch_size": patch_size,
-        }
-
-        interp_row = row_space - top + top_pad + 1
-        interp_col = col_space - left + left_pad + 1
-        interp_coords = np.stack(np.meshgrid(interp_row, interp_col), axis=0)
-
-        patch_arrs = []
         for field in self.fields:
-            field_arr = self.field_data[field[0]][field[1]]
-            interp_input = field_arr[top - top_pad : bottom + bottom_pad, left - left_pad : right + right_pad]
-            interp_output = []
-            for i in range(interp_input.shape[2]):
-                interp_output.append(map_coordinates(interp_input[:, :, i], interp_coords, order=1).T)
-            patch_arrs.append(np.stack(interp_output, axis=2))
-        patch_arr = np.concatenate(patch_arrs, axis=2)
-
-        return patch_arr, patch_box
+            h5_dataset = self.h5[field[0]][field[1]]
+            # rows will be the same across columns, which we can use to index this cheaply
+            row_crop = np.array(h5_dataset[patch["pg_row"][:, 0]])
+            # add extra dimensions to the column index if we need them for take_along_axis
+            pg_col = patch["pg_col"]
+            if len(row_crop.shape) == 3:
+                pg_col = np.expand_dims(pg_col, axis=2)
+            # get the patch values
+            patch_values = np.take_along_axis(row_crop, pg_col, axis=1)
+            if len(patch_values.shape) == 2:
+                patch_values = np.expand_dims(patch_values, axis=2)
+            # figure out where values are filled or missing
+            valid_mask = patch_values != h5_dataset.attrs["_FillValue"]
+            if h5_dataset.attrs["Num_missing_value"] > 0:
+                valid_mask = valid_mask * (patch_values != h5_dataset.attrs["missing_value"])
+            # apply the scaling and addition, where valid
+            if h5_dataset.attrs["scale_factor"] != 1 or h5_dataset.attrs["add_offset"] != 1:
+                patch_values = patch_values.astype(type(h5_dataset.attrs["scale_factor"]))
+                patch_values[valid_mask] = (
+                    patch_values[valid_mask] * h5_dataset.attrs["scale_factor"] + h5_dataset.attrs["add_offset"]
+                )
+            patch_data.append(patch_values)
+        patch_arr = np.concatenate(patch_data, axis=2)
+        return patch_arr
 
 
 class CLDCLASSScene:
@@ -391,73 +319,46 @@ class CLDCLASSScene:
         self.filepath = filepath
         self.filename = os.path.split(self.filepath)[1]
         self.hdf = SD(self.filepath, SDC.READ)
-        self.lat, self.lon = np.array(self.hdf.select("Latitude")), np.array(self.hdf.select("Longitude"))
+        self.lat = np.array(self.hdf.select("Latitude"))
+        self.lon = np.array(self.hdf.select("Longitude"))
         self.height = np.array(self.hdf.select("Height"))
         self.time = np.array(self.hdf.select("Time"))
         self.cloud_scenario = _decode_cloud_scenario(np.array(self.hdf.select("cloud_scenario")))
 
-    def get_nadir_mask(self, par_scene: PARASOLScene) -> np.array:
-        """Get the nadir mask for this CLDCLASS Scene. The nadir mask is the mask of pixels in the POLDER grid of the
-        provided PARASOL Scene that are directly beneath (nadir) CloudSat, and for which we have LiDAR returns.
+    def get_lat_intervals(self, patch_size: int) -> np.array:
+        """Get the array of all index pairs in this scene's latitude array that cover a patch.
 
         Args:
-            par_scene: The PARASOL/POLDER scene whose POLDER grid to use
-        Returns:
-            nadir_mask: The nadir mask for this CLDCLASS scene
-        """
-        lon_c = (self.lon + par_scene.theta + 180) % 360 - 180
-        row, col = latlon_to_polder_grid(self.lat, lon_c)
-        valid_row_idx = (row >= par_scene.crop["top"]) * (row < par_scene.crop["bottom"])
-        valid_col_idx = (col >= par_scene.crop["left"]) * (col < par_scene.crop["right"])
-        valid_idx = valid_row_idx * valid_col_idx
-        nadir_mask = np.zeros(par_scene.crop_shape, dtype=bool)
-        crop_row = row[valid_idx].astype(int) - par_scene.crop["top"]
-        crop_col = col[valid_idx].astype(int) - par_scene.crop["left"]
-        nadir_mask[crop_row, crop_col] = 1
-        return nadir_mask
+            patch_size: The size (width, height) of square patches in the output dataset.
 
-    def get_nadir_validity(self, par_scene: PARASOLScene, patch_size: int, padding: int = 0) -> np.array:
-        """Get the 'nadir validity' of this CLDCLASS Scene in the provided PARASOL scene. The 'nadir validity' is the
-        mask of all box centers of boxes with size (patch_size, patch_size) that satisfy two conditions: 1) the
-        CLDCLASS nadir line is within the box, and 2) there are at least 'padding' pixels between the nadir line and the
-        left (west) and right (east) edges of the box.
+        Returns:
+            cc_lat_intervals: Array of all index pairs in this scene's latitude array that cover a patch.
+        """
+        patch_lat_range = patch_size / 18  # 18 POLDER Grid rows <=> 1 degree of latitude
+        cc_lat_intervals = []
+        for i in range(self.lat.shape[0] - 1):
+            for j in range(i + 1, self.lat.shape[0]):
+                lat_diff = np.abs(self.lat[j] - self.lat[i])
+                if lat_diff > patch_lat_range:
+                    cc_lat_intervals.append([i, j])
+                    break
+        cc_lat_intervals = np.array(cc_lat_intervals)
+        return cc_lat_intervals
+
+    def get_patch(self, patch: dict) -> dict:
+        """Get a patch in this scene.
 
         Args:
-            par_scene: The PARASOL/POLDER scene in which to find the validity
-            patch_size: The side length of the patch square
-            padding: The padding to keep between the nadir line and box edges, defaults to 0.
-        Returns:
-            nadir_validity: The nadir validity mask, in the POLDER grid
-        """
-        nadir_mask = self.get_nadir_mask(par_scene).astype(int)
-        row_filter = np.zeros((1, patch_size))
-        row_filter[:, padding:-padding] = 1
-        rows_fit = convolve(nadir_mask, row_filter, mode="constant") >= 1
-        col_filter = np.zeros((patch_size, 1)) + 1
-        nadir_validity = convolve(rows_fit.astype(int), col_filter, mode="constant") >= patch_size
-        return nadir_validity
+            patch: Geographic info on a patch, with indices to values in this scene.
 
-    def get_patch_labels(self, par_scene: PARASOLScene, patch_box: dict) -> dict:
-        """Get the labels for a patch. Labels consist of all the available CLDCLASS data cropped to the patch.
-
-        Arguments:
-            par_scene: The PARASOL scene whose grid contains the patch
-            patch_box: The patch description, containing the row space and column space of the patch
         Returns:
-            labels: The labels for the provided patch
+            patch_dict: Dictionary from fields to their values in this patch.
         """
-        lon_c = (self.lon + par_scene.theta + 180) % 360 - 180
-        row, col = latlon_to_polder_grid(self.lat, lon_c)
-        row, col = row - par_scene.crop["top"], col - par_scene.crop["left"]
-        top, bottom = patch_box["row_space"][0], patch_box["row_space"][-1]
-        left, right = patch_box["col_space"][0], patch_box["col_space"][-1]
-        lidar_idx = (row >= top) * (row < bottom) * (col >= left) * (col < right)
-        labels = {
-            "lat": self.lat[lidar_idx],
-            "lon": self.lon[lidar_idx],
-            "height": self.height[lidar_idx],
-            "time": self.time[lidar_idx],
-            "cloud_scenario": {k: self.cloud_scenario[k][lidar_idx] for k in self.cloud_scenario},
-            "patch_idx": (row[lidar_idx] - top, col[lidar_idx] - left),
+        patch_dict = {
+            "lat": self.lat[patch["cc_idx"]],
+            "lon": self.lon[patch["cc_idx"]],
+            "height": self.height[patch["cc_idx"]],
+            "time": self.time[patch["cc_idx"]],
+            "cloud_scenario": {k: self.cloud_scenario[k][patch["cc_idx"]] for k in self.cloud_scenario},
         }
-        return labels
+        return patch_dict

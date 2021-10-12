@@ -109,7 +109,7 @@ _DIRECTIONAL = [
 
 # The minimal set of fields to use for debugging
 _MINIMAL = [
-    ("Data_Directional_Fields", "I865NP"),
+    ("Data_Directional_Fields", "I865P"),
     ("Data_Fields", "Nviews"),
     ("Data_Fields", "cloud_indicator"),
     ("Geolocation_Fields", "Latitude"),
@@ -127,8 +127,8 @@ _BANDS = {
     910: ["I910NP"],
     1020: ["I1020NP"],
 }
-_SINGLE_BAND_OTHER_FIELDS = [
-    ("Data_Directional_Fields", "phi"),
+_GEOM_FIELDS = [
+    # ("Data_Directional_Fields", "phi"),
     ("Data_Directional_Fields", "thetas"),
     ("Data_Directional_Fields", "thetav"),
 ]
@@ -139,6 +139,26 @@ FIELD_DICT = {
     "directional": _DIRECTIONAL,
     "minimal": _MINIMAL,
 }
+
+# single-band fields, with and without polarization
 for band_wl, band_fields in _BANDS.items():
-    fields = [("Data_Directional_Fields", field) for field in band_fields] + _SINGLE_BAND_OTHER_FIELDS
+    fields_no_geom = [("Data_Directional_Fields", field) for field in band_fields]
+    fields = fields_no_geom + _GEOM_FIELDS
     FIELD_DICT[f"single_band_{band_wl}"] = fields
+    FIELD_DICT[f"single_band_{band_wl}_no_geom"] = fields_no_geom
+    if len(band_fields) == 3:
+        fields_no_p_no_geom = [("Data_Directional_Fields", band_fields[0])]
+        fields_no_p = fields_no_p_no_geom + _GEOM_FIELDS
+        FIELD_DICT[f"single_band_{band_wl}_no_p"] = fields_no_p
+        FIELD_DICT[f"single_band_{band_wl}_no_p_no_geom"] = fields_no_p_no_geom
+
+# some tri-band combinations of fields
+FIELD_DICT["tri1"] = [("Data_Directional_Fields", _BANDS[band][0]) for band in [490, 670, 865]] + _GEOM_FIELDS
+FIELD_DICT["tri2"] = [("Data_Directional_Fields", _BANDS[band][0]) for band in [443, 763, 1020]] + _GEOM_FIELDS
+FIELD_DICT["tri3"] = [("Data_Directional_Fields", _BANDS[band][0]) for band in [443, 490, 565]] + _GEOM_FIELDS
+FIELD_DICT["tri4"] = [("Data_Directional_Fields", _BANDS[band][0]) for band in [670, 763, 765]] + _GEOM_FIELDS
+FIELD_DICT["tri5"] = [("Data_Directional_Fields", _BANDS[band][0]) for band in [865, 910, 1020]] + _GEOM_FIELDS
+
+# all of the bands, with and without polarization
+FIELD_DICT["all_bands"] = [("Data_Directional_Fields", f) for band in _BANDS for f in _BANDS[band]] + _GEOM_FIELDS
+FIELD_DICT["all_bands_no_p"] = [("Data_Directional_Fields", f[0]) for f in _BANDS.values()] + _GEOM_FIELDS

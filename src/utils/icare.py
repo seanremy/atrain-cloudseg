@@ -34,12 +34,13 @@ class ICARESession:
 
         Args:
             temp_dir: Path to the temporary directory to use as a cache.
+            max_temp_files: The maximum amount of files to cache at once.
         """
         self.temp_dir = temp_dir
         self.max_temp_files = max_temp_files
         self.temp_files = []
         for dirpath, _, filenames in os.walk(self.temp_dir):
-            self.temp_files += [os.path.join(dirpath, f) for f in filenames]
+            self.temp_files += [os.path.join(dirpath, f) for f in filenames if not f.startswith(".")]
         self.login()
         if not os.path.exists(self.temp_dir):
             os.makedirs(self.temp_dir, exist_ok=True)
@@ -99,7 +100,7 @@ class ICARESession:
         #     time.sleep(0.1)
 
     def listdir(self, dir_path: str) -> list:
-        """List the contents of a directory, with a cache.
+        """List the contents of a directory.
 
         Args:
             dir_path: Path to the directory
@@ -108,33 +109,31 @@ class ICARESession:
             listing: Directory listing
         """
         split_path = [s for s in dir_path.split("/") if s != ""]
-        listing = self._get_rec(self.dir_tree, split_path)
-        if listing == {}:
-            err_code = None
-            attempts = 0
-            while err_code in [None, "421", "430", "434"]:
-                attempts += 1
-                if attempts > 10:
-                    raise Exception("Too many failed listdir attempts!!")
-                try:
-                    nlst = self.ftp.nlst(dir_path)
-                    break
-                except error_temp as e:
-                    print(e)
-                    err_code = str(e)[:3]
-                    if err_code in ["421", "430", "434"]:
-                        self.login()
-                    else:
-                        raise FileNotFoundError(f"Could not find {dir_path} in ICARE server.")
-            listing = sorted([f.split("/")[-1] for f in nlst])
-            listing_dict = {}
-            for l in listing:
-                # check for a file extension
-                if len(l) > 5 and "." in l[-5:-1]:
-                    listing_dict[l] = l
+        err_code = None
+        attempts = 0
+        while err_code in [None, "421", "430", "434"]:
+            attempts += 1
+            if attempts > 10:
+                raise Exception("Too many failed listdir attempts!!")
+            try:
+                nlst = self.ftp.nlst(dir_path)
+                break
+            except error_temp as e:
+                print(e)
+                err_code = str(e)[:3]
+                if err_code in ["421", "430", "434"]:
+                    self.login()
                 else:
-                    listing_dict[l] = {}
-            self.dir_tree = self._set_rec(self.dir_tree, split_path, listing_dict)
+                    raise FileNotFoundError(f"Could not find {dir_path} in ICARE server.")
+        listing = sorted([f.split("/")[-1] for f in nlst])
+        listing_dict = {}
+        for l in listing:
+            # check for a file extension
+            if len(l) > 5 and "." in l[-5:-1]:
+                listing_dict[l] = l
+            else:
+                listing_dict[l] = {}
+        self.dir_tree = self._set_rec(self.dir_tree, split_path, listing_dict)
         return listing
 
     def get_file(self, filepath: str) -> str:
