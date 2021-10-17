@@ -1,4 +1,8 @@
-"""Train a model on the A-Train dataset. This script uses a single GPU only."""
+"""Train a model on the A-Train dataset. This script is written to use SLURM and multiple GPUs. A simpler training
+script is a work in progress.
+
+Some code borrowed from: https://github.com/erikwijmans/skynet-ddp-slurm-example
+"""
 import argparse
 import datetime
 import json
@@ -10,6 +14,7 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+import torch.distributed as distrib
 from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -23,6 +28,7 @@ from losses.segmentation import SmoothnessPenalty
 from models.factory import model_factory
 from utils.parasol_fields import FIELD_DICT
 from utils.plotting import get_cloud_mask_viz
+from utils.slurm import init_distrib_slurm
 
 EXIT = threading.Event()
 EXIT.clear()
@@ -52,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=6, help="Number of workers.")
     parser.add_argument("--profile", action="store_true", help="Whether or not to use the pytorch profiler.")
     parser.add_argument("--save-frequency", type=int, default=5, help="How often (in epochs) to checkpoint the model.")
+    # parser.add_argument("--slurm", action="store_true", help="Use this option if you're running this job with SLURM.")
     parser.add_argument("--smoothness", type=float, default=0, help="Weight for the smoothness penalty.")
     parser.add_argument("--task", type=str, default="bin_seg_3d", help="Which task to perform.")
     args = parser.parse_args()
@@ -169,11 +176,13 @@ def run_epoch(
     penalty = SmoothnessPenalty()
 
     stats = torch.zeros((3,), device=device)
-    pbar = tqdm(dloader)
+    world_rank = distrib.get_rank()
+    # dloader_iter = tqdm(dloader) if world_rank == 0 else dloader
     predictions = {}
     batch_idx = -1
     viz_freq = 50
-    for batch in pbar:
+    # for batch in dloader_iter:
+    for batch in dloader:
         batch_idx += 1
 
         batch = dict_to(batch, device)
@@ -231,34 +240,38 @@ def run_epoch(
         for i in range(batch["instance_id"].shape[0]):
             predictions[int(batch["instance_id"][i])] = pred_classes[batch["input"]["interp"]["batch_idx"] == i]
 
-        desc_list = [
-            f"Avg {mode.capitalize()} Loss={stats[0] / stats[2]:.3f}",
-            f"Mean {mode.capitalize()} Dice={stats[1] / stats[2]:.3f}",
-        ]
-        pbar.set_description("  |  ".join(desc_list))
+        if world_rank == 0:
+            # desc_list = [
+            #     f"Avg {mode.capitalize()} Loss={stats[0] / stats[2]:.3f}",
+            #     f"Mean {mode.capitalize()} Dice={stats[1] / stats[2]:.3f}",
+            # ]
+            # dloader_iter.set_description("  |  ".join(desc_list))
 
-        writer.add_scalar(f"{mode} loss", loss_total, epoch * len(dloader) + batch_idx + 1)
-        writer.add_scalar(f"{mode} dice", mean_dice, epoch * len(dloader) + batch_idx + 1)
+            writer.add_scalar(f"{mode} loss", loss_total, epoch * len(dloader) + batch_idx + 1)
+            writer.add_scalar(f"{mode} dice", mean_dice, epoch * len(dloader) + batch_idx + 1)
 
-        if (batch_idx + 1) % viz_freq == 0:
-            batch_viz = []
-            for i in range(batch["instance_id"].shape[0]):
-                iid = batch["instance_id"][i]
-                gt_cloud_scenario = batch["output"]["cloud_scenario"][batch["input"]["interp"]["batch_idx"] == i]
-                viz = get_cloud_mask_viz(predictions[int(iid)], gt_cloud_scenario)
-                batch_viz.append(viz)
-            batch_viz = np.concatenate(batch_viz, axis=1)
-            viz_tag = f"cloud mask viz | epoch {epoch + 1} | {mode} batch {batch_idx + 1}"
-            writer.add_image(viz_tag, batch_viz, dataformats="HW")
+            # if (batch_idx + 1) % viz_freq == 0:
+            #     batch_viz = []
+            #     for i in range(batch["instance_id"].shape[0]):
+            #         iid = batch["instance_id"][i]
+            #         gt_cloud_scenario = batch["output"]["cloud_scenario"][batch["input"]["interp"]["batch_idx"] == i]
+            #         viz = get_cloud_mask_viz(predictions[int(iid)], gt_cloud_scenario)
+            #         batch_viz.append(viz)
+            #     batch_viz = np.concatenate(batch_viz, axis=1)
+            #     viz_tag = f"cloud mask viz | epoch {epoch + 1} | {mode} batch {batch_idx + 1}"
+            #     writer.add_image(viz_tag, batch_viz, dataformats="HW")
 
         if EXIT.is_set():
             return
 
-    stats[0:2] /= stats[2]
+    distrib.all_reduce(stats)
 
-    tqdm.write(f"{mode.capitalize()}: Avg Loss={stats[0].item():.3f}    Dice={stats[1].item():.3f}")
-    if mode == "val":
-        scheduler.step(stats[1])
+    if world_rank == 0:
+        stats[0:2] /= stats[2]
+
+        tqdm.write(f"{mode.capitalize()}: Avg Loss={stats[0].item():.3f}    Dice={stats[1].item():.3f}")
+        if mode == "val":
+            scheduler.step(stats[1])
 
     return predictions, stats
 
@@ -327,21 +340,30 @@ def checkpoint(
 def main() -> None:
     args = parse_args()
 
-    device = torch.device("cuda")
+    # local_rank, _ = init_distrib_slurm(backend="gloo")  # use for debugging on CPU
+    local_rank, _ = init_distrib_slurm()
+
+    world_rank = distrib.get_rank()
+    world_size = distrib.get_world_size()
+
+    device = torch.device("cuda", local_rank)
+    torch.cuda.set_device(device)
     profiler = None
     writer = None
     now_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_dir = os.path.join("data", "tensorboard", f"{args.exp_name}_{now_str}")
-    make_exp_dir(args)
-    os.makedirs(tensorboard_dir)
-    if args.profile:
-        profiler = torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=2, warmup=2, active=6, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(tensorboard_dir),
-            record_shapes=True,
-            with_stack=True,
-        )
-    writer = SummaryWriter(tensorboard_dir)
+    # only rank 0 is responsible for making directories, profiling, and tensorboard
+    if world_rank == 0:
+        make_exp_dir(args)
+        os.makedirs(tensorboard_dir)
+        if args.profile:
+            profiler = torch.profiler.profile(
+                schedule=torch.profiler.schedule(wait=2, warmup=2, active=6, repeat=1),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(tensorboard_dir),
+                record_shapes=True,
+                with_stack=True,
+            )
+        writer = SummaryWriter(tensorboard_dir)
 
     fields = FIELD_DICT[args.fields]
     atrain_train = ATrain("train", args.task, angles_to_omit=args.angles_to_omit, fields=fields)
@@ -349,7 +371,12 @@ def main() -> None:
     train_loader = DataLoader(
         atrain_train,
         batch_size=args.batch_size,
-        shuffle=True,
+        sampler=torch.utils.data.distributed.DistributedSampler(
+            dataset=atrain_train,
+            num_replicas=world_size,
+            rank=world_rank,
+            seed=np.random.randint(2 ** 32),
+        ),
         collate_fn=collate_atrain,
         drop_last=True,
         num_workers=args.num_workers,
@@ -358,7 +385,9 @@ def main() -> None:
     val_loader = DataLoader(
         atrain_val,
         batch_size=args.batch_size,
-        shuffle=False,
+        sampler=torch.utils.data.distributed.DistributedSampler(
+            dataset=atrain_val, num_replicas=world_size, rank=world_rank
+        ),
         collate_fn=collate_atrain,
         num_workers=args.num_workers,
         pin_memory=True,
@@ -379,24 +408,33 @@ def main() -> None:
     # model = convert_groupnorm_model(model, ngroups=min(32, args.batch_size))
 
     model = model.to(device)
+    model = torch.nn.parallel.DistributedDataParallel(
+        model,
+        device_ids=[device],
+        output_device=device,
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", threshold=1e-3, eps=1e-12)
 
     for epoch in range(args.num_epochs):
         lr = optimizer.state_dict()["param_groups"][0]["lr"]
-        tqdm.write(f"\n\n===== Epoch {epoch+1:3d}/{args.num_epochs:3d} =====")
-        tqdm.write(f"learning rate: {lr:.2e}\n")
+        if world_rank == 0:
+            tqdm.write(f"\n\n===== Epoch {epoch+1:3d}/{args.num_epochs:3d} =====")
+            tqdm.write(f"learning rate: {lr:.2e}\n")
 
         _, train_stats = run_epoch("train", model, optimizer, train_loader, writer, scheduler, profiler, epoch, args)
         val_predictions, val_stats = run_epoch(
             "val", model, optimizer, val_loader, writer, scheduler, profiler, epoch, args
         )
-
-        val_metrics = atrain_val.evaluate(val_predictions)
+        # TO DO: get evaluation to work with distributed
+        # val_metrics = None
+        # if world_rank == 0 and (epoch + 1) % args.eval_frequency == 0:
+        #     val_metrics = atrain_val.evaluate(val_predictions)
 
         train_loader.sampler.set_epoch(epoch)
 
-        checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
+        # if local_rank == 0:
+        #     checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
 
         if EXIT.is_set():
             break

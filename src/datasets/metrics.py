@@ -1,5 +1,7 @@
 """Metrics for the A-Train Cloud Segmentation Dataset."""
 
+from typing import Callable
+
 import numpy as np
 
 
@@ -74,7 +76,7 @@ def get_seg_3d_metrics(gt_seg_3d, pred_seg_3d):
     raise NotImplementedError
 
 
-def get_metrics_func(task: str) -> function:
+def get_metrics_func(task: str) -> Callable:
     """Get a function to compute metrics for a task.
 
     Args:

@@ -124,6 +124,10 @@ class ATrain(Dataset):
         cloud_scenario_flags = output_dict.pop("cloud_scenario")
         cloud_scenario = cloud_scenario_flags.pop("cloud_scenario")  # (p, 125)
 
+        # crop the cloud scenario to remove the empty altitude bins
+        cloud_scenario = cloud_scenario[:, 4:103]
+        cloud_scenario_flags = {k: cloud_scenario_flags[k][:, 4:103] for k in cloud_scenario_flags}
+
         item = {
             "instance_id": inst_id,
             "input": {
@@ -168,7 +172,7 @@ class ATrain(Dataset):
             pred = predictions[inst_id]
 
             gt_labels = pickle.load(open(os.path.join(self.dataset_root, inst["output_path"]), "rb"))
-            gt_cloud_scenario = gt_labels["cloud_scenario"]["cloud_scenario"]
+            gt_cloud_scenario = gt_labels["cloud_scenario"]["cloud_scenario"][:, 4:103]
 
             inst_metrics = self.metrics_func(gt_cloud_scenario, pred)
 
@@ -231,7 +235,7 @@ def collate_atrain(batch: list) -> dict:
         inst_ids.append(inst["instance_id"])
         sensor_input.append(torch.as_tensor(inst["input"]["sensor_input"], dtype=torch.float))
         b_idx.append(torch.as_tensor([inst_idx], dtype=torch.long).repeat(inst["input"]["interp"]["corners"].shape[0]))
-        # Pre-compute interpolation corners and weights so that applying the interpolated loss is quick and easy
+        # use pre-computed interpolation corners and weights so that applying the interpolated loss is quick and easy
         interp_corners.append(torch.as_tensor(inst["input"]["interp"]["corners"], dtype=torch.long))
         interp_weights.append(torch.as_tensor(inst["input"]["interp"]["weights"], dtype=torch.float))
         cloud_scenario.append(torch.as_tensor(inst["output"]["cloud_scenario"], dtype=torch.long))
