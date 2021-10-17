@@ -23,7 +23,7 @@ If you're interested in machine learning or computer vision, you may find this d
 - It's easy to use; all instances are pre-processed numpy / pickle objects.
 - Dataloaders and models are implemented in [Pytorch](https://pytorch.org/).
 - Input images have 288 channels, posing a unique challenge.
-- Labels are rich, containing cloud types for 125 altitude bins.
+- Labels are rich, containing cloud types for 99 altitude bins.
 - Labels are sparse, making this an interesting test-case for sparse supervision.
 
 If you come from the atmospheric remote sensing community, you may find this dataset interesting because:
@@ -63,7 +63,7 @@ Some examples images are shown below. These images are averaged over the 4 centr
 
 Outputs are not hand-labeled, and instead come from the [CloudSat](https://cloudsat.atmos.colostate.edu/) satellite. More specifically, we source the data from a [CALTRACK](https://www.icare.univ-lille.fr/calxtract/) product: [2B-CLDCLASS](http://www.cloudsat.cira.colostate.edu/data-products/level-2b/2b-cldclass) (vertical cloud profiles). These data are spatially aligned with the PARASOL/POLDER data to sub-pixel accuracy. The CloudSat data in this product are already time-synchronized with [CALIPSO](https://www-calipso.larc.nasa.gov/), therefore we use another CALTRACK product which contains time offsets between PARASOL and CALIPSO in order to ensure the records match within a maximum time offset threshold of 10 minutes.
 
-Semantic segmentation involves predicting the class-membership mask of a single 'layer' of an image. However, our dataset contains vertical cloud profiles over 125 altitude bins. You can think of this as asking the network to simultaneously perform 125 (highly correlated) semantic segmentation tasks.
+Semantic segmentation involves predicting the class-membership mask of a single 'layer' of an image. However, our dataset contains vertical cloud profiles over 99 altitude bins. You can think of this as asking the network to simultaneously perform 99 (highly correlated) semantic segmentation tasks.
 
 There are two main limitations of these outputs.
 
@@ -72,7 +72,7 @@ There are two main limitations of these outputs.
 
 At inference time, outputs have shape:
 
-```output_shape = (batch_size, num_classes=9, num_altitude_bins=125, height=100, width=100)```
+```output_shape = (batch_size, num_classes=9, num_altitude_bins=99, height=100, width=100)```
 
 An example label is displayed below:
 
@@ -84,7 +84,7 @@ The same example, displayed over its associated image. The green line shows the 
 
 Ground truth is only defined on a sparse set of locations, with varying amounts of labeled locations per image. Additionally, these locations are not quantized to the same grid as the input. Therefore, before applying the loss function, we interpolate and reshape the output:
 
-```interpolated_shape = (num_pixels_in_batch, num_classes=9, num_altitude_bins=125)```
+```interpolated_shape = (num_pixels_in_batch, num_classes=9, num_altitude_bins=99)```
 
 Note: the interpolation function is differentiable, and doesn't interfere with backpropagation.
 
@@ -112,7 +112,7 @@ We support three different tasks. The most challenging is volumetric semantic se
         conda activate atrain
         python -m pip install -r requirements.txt -f https://download.pytorch.org/whl/torch_stable.html
 
-3. Download and extract the dataset. You can download the dataset from [this (temporary) link](https://drive.google.com/file/d/1enZITkob80CocfINCTMUmXga8LEwOYzf/view?usp=sharing). Once you have the dataset downloaded, you can extract it with:
+3. Download and extract the dataset. You can download the dataset from [this (temporary) link](https://drive.google.com/file/d/1F0hFQBn7IqaneVd9M66tTNQ4zD6Bcn1J/view?usp=sharing). Once you have the dataset downloaded, you can extract it with:
 
         tar -xzf <path/to/the/downloaded/file> -C <path/to/where/you/want/the/dataset>
 
