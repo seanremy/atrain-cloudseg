@@ -72,23 +72,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-# def convert_groupnorm_model(module: nn.Module, ngroups: int = 32) -> nn.Module:
-#     """Convert all of the batch-normalization layers in a module to group-normalization.
-
-#     Args:
-#         module: The module to convert.
-#         ngroups: The number of groups to use, defaults to 32.
-#     Returns:
-#         mod: The converted module.
-#     """
-#     mod = module
-#     if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
-#         mod = nn.GroupNorm(ngroups, module.num_features, affine=module.affine)
-#     for name, child in module.named_children():
-#         mod.add_module(name, convert_groupnorm_model(child, ngroups))
-#     return mod
-
-
 def dict_to(d: dict, device: torch.device) -> dict:
     """Recursively sends a dictionary's leaf nodes to the provided device, if they're torch Tensors.
 
@@ -353,7 +336,6 @@ def main() -> None:
         collate_fn=collate_atrain,
         drop_last=True,
         num_workers=args.num_workers,
-        pin_memory=True,
     )
     val_loader = DataLoader(
         atrain_val,
@@ -361,7 +343,6 @@ def main() -> None:
         shuffle=False,
         collate_fn=collate_atrain,
         num_workers=args.num_workers,
-        pin_memory=True,
     )
 
     # add 1 if we have geometry channels for the geometry mask
@@ -374,9 +355,6 @@ def main() -> None:
     patch_size = atrain_train[0]["input"]["sensor_input"].shape[1:]
 
     model = model_factory[args.arch](in_channels, out_channels, patch_size, args)
-
-    # # Let's use group norm instead of batch norm because batch norm can be problematic if the batch size per GPU gets really small
-    # model = convert_groupnorm_model(model, ngroups=min(32, args.batch_size))
 
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -393,8 +371,6 @@ def main() -> None:
         )
 
         val_metrics = atrain_val.evaluate(val_predictions)
-
-        train_loader.sampler.set_epoch(epoch)
 
         checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
 

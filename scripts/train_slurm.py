@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from contextlib import nullcontext
 
@@ -45,7 +46,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--arch", type=str, default="unet_2d", help="Which model architecture to use.")
     parser.add_argument("--base-depth", type=int, default=64, help="Base depth for the U-Net model.")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size to use for training and validation.")
-    # parser.add_argument("--debug", action="store_true", help="Debug mode.")
     parser.add_argument("--dont-weight-loss", action="store_true", help="Don't class-weight the loss function.")
     parser.add_argument("--eval-frequency", type=int, default=1, help="How often (in epochs) to evaluate.")
     parser.add_argument("--exp-name", type=str, required=True, help="Name of the experiment.")
@@ -58,7 +58,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=6, help="Number of workers.")
     parser.add_argument("--profile", action="store_true", help="Whether or not to use the pytorch profiler.")
     parser.add_argument("--save-frequency", type=int, default=5, help="How often (in epochs) to checkpoint the model.")
-    # parser.add_argument("--slurm", action="store_true", help="Use this option if you're running this job with SLURM.")
     parser.add_argument("--smoothness", type=float, default=0, help="Weight for the smoothness penalty.")
     parser.add_argument("--task", type=str, default="bin_seg_3d", help="Which task to perform.")
     args = parser.parse_args()
@@ -77,23 +76,6 @@ def parse_args() -> argparse.Namespace:
     assert args.num_epochs > 0
     assert args.task in ["seg_3d", "bin_seg_3d", "bin_seg_2d"]
     return args
-
-
-# def convert_groupnorm_model(module: nn.Module, ngroups: int = 32) -> nn.Module:
-#     """Convert all of the batch-normalization layers in a module to group-normalization.
-
-#     Args:
-#         module: The module to convert.
-#         ngroups: The number of groups to use, defaults to 32.
-#     Returns:
-#         mod: The converted module.
-#     """
-#     mod = module
-#     if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
-#         mod = nn.GroupNorm(ngroups, module.num_features, affine=module.affine)
-#     for name, child in module.named_children():
-#         mod.add_module(name, convert_groupnorm_model(child, ngroups))
-#     return mod
 
 
 def dict_to(d: dict, device: torch.device) -> dict:
@@ -143,6 +125,8 @@ def run_epoch(
     """
     assert mode in ["train", "val"]
 
+    epoch_start_time = time.time()
+
     if mode == "train":
         model.train()
     else:
@@ -177,11 +161,9 @@ def run_epoch(
 
     stats = torch.zeros((3,), device=device)
     world_rank = distrib.get_rank()
-    # dloader_iter = tqdm(dloader) if world_rank == 0 else dloader
     predictions = {}
     batch_idx = -1
     viz_freq = 50
-    # for batch in dloader_iter:
     for batch in dloader:
         batch_idx += 1
 
@@ -214,7 +196,7 @@ def run_epoch(
             optimizer.zero_grad()
             loss_total.backward()
             optimizer.step()
-        if args.profile:
+        if world_rank == 0 and args.profile:
             profiler.step()
 
         cls_dice_scores = []  # store per-class dice score
@@ -241,11 +223,6 @@ def run_epoch(
             predictions[int(batch["instance_id"][i])] = pred_classes[batch["input"]["interp"]["batch_idx"] == i]
 
         if world_rank == 0:
-            # desc_list = [
-            #     f"Avg {mode.capitalize()} Loss={stats[0] / stats[2]:.3f}",
-            #     f"Mean {mode.capitalize()} Dice={stats[1] / stats[2]:.3f}",
-            # ]
-            # dloader_iter.set_description("  |  ".join(desc_list))
 
             writer.add_scalar(f"{mode} loss", loss_total, epoch * len(dloader) + batch_idx + 1)
             writer.add_scalar(f"{mode} dice", mean_dice, epoch * len(dloader) + batch_idx + 1)
@@ -269,7 +246,12 @@ def run_epoch(
     if world_rank == 0:
         stats[0:2] /= stats[2]
 
-        tqdm.write(f"{mode.capitalize()}: Avg Loss={stats[0].item():.3f}    Dice={stats[1].item():.3f}")
+        elapsed_time = time.time() - epoch_start_time
+        elapsed_time = str(datetime.timedelta(seconds=elapsed_time))
+
+        tqdm.write(
+            f"{mode.capitalize() + ':':6s} Avg Loss={stats[0].item():.3f}    Dice={stats[1].item():.3f}    Runtime={elapsed_time}"
+        )
         if mode == "val":
             scheduler.step(stats[1])
 
@@ -366,8 +348,8 @@ def main() -> None:
         writer = SummaryWriter(tensorboard_dir)
 
     fields = FIELD_DICT[args.fields]
-    atrain_train = ATrain("train", args.task, angles_to_omit=args.angles_to_omit, fields=fields)
-    atrain_val = ATrain("val", args.task, angles_to_omit=args.angles_to_omit, fields=fields)
+    atrain_train = ATrain("train", args.task, angles_to_omit=args.angles_to_omit, fields=fields, use_hdf5=False)
+    atrain_val = ATrain("val", args.task, angles_to_omit=args.angles_to_omit, fields=fields, use_hdf5=False)
     train_loader = DataLoader(
         atrain_train,
         batch_size=args.batch_size,
@@ -380,7 +362,6 @@ def main() -> None:
         collate_fn=collate_atrain,
         drop_last=True,
         num_workers=args.num_workers,
-        pin_memory=True,
     )
     val_loader = DataLoader(
         atrain_val,
@@ -390,7 +371,6 @@ def main() -> None:
         ),
         collate_fn=collate_atrain,
         num_workers=args.num_workers,
-        pin_memory=True,
     )
 
     # add 1 if we have geometry channels for the geometry mask
@@ -403,9 +383,6 @@ def main() -> None:
     patch_size = atrain_train[0]["input"]["sensor_input"].shape[1:]
 
     model = model_factory[args.arch](in_channels, out_channels, patch_size, args)
-
-    # # Let's use group norm instead of batch norm because batch norm can be problematic if the batch size per GPU gets really small
-    # model = convert_groupnorm_model(model, ngroups=min(32, args.batch_size))
 
     model = model.to(device)
     model = torch.nn.parallel.DistributedDataParallel(
@@ -426,15 +403,14 @@ def main() -> None:
         val_predictions, val_stats = run_epoch(
             "val", model, optimizer, val_loader, writer, scheduler, profiler, epoch, args
         )
-        # TO DO: get evaluation to work with distributed
-        # val_metrics = None
-        # if world_rank == 0 and (epoch + 1) % args.eval_frequency == 0:
-        #     val_metrics = atrain_val.evaluate(val_predictions)
 
         train_loader.sampler.set_epoch(epoch)
 
-        # if local_rank == 0:
-        #     checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
+        # TO DO: get evaluation to work with distributed
+        # if world_rank == 0:
+        #     val_metrics = atrain_val.evaluate(val_predictions)
+        #     if (epoch + 1) % args.eval_frequency == 0:
+        #         checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
 
         if EXIT.is_set():
             break

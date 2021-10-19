@@ -10,6 +10,7 @@ import sys
 from collections import defaultdict
 from typing import Callable
 
+import h5py
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
@@ -33,17 +34,20 @@ class ATrain(Dataset):
         get_nondir: bool = False,
         get_flags: bool = False,
         split_name: str = "split_default",
+        use_hdf5: bool = False,
     ) -> None:
         """Create an A-Train Dataset.
 
         Args:
             mode: Which mode to use for training. In the default split, this must be 'train' or 'val'.
             task: Which task to use this dataset for.
+            angles_to_omit: List of angles to omit from each instance.
             fields: List of fields to get in this dataset.
             get_nondir: Get non-directional fields for each instance. Considerably slows down data loading. Defaults to
                         False.
             get_flags: Get flags for the cloud scenario output. Defaults to False.
             split_name: The name of the split file to use.
+            use_hdf5: Whether or not to use a pre-made hdf5 file to avoid I/O bottlenecks. Defaults to False.
         """
         super().__init__()
         assert all([a >= 0 and a < 16 for a in angles_to_omit])
@@ -56,9 +60,16 @@ class ATrain(Dataset):
         self.get_nondir = get_nondir
         self.get_flags = get_flags
         self.split_name = split_name
+        self.use_hdf5 = use_hdf5
 
         self.dataset_root = os.path.join(os.path.dirname(__file__), "..", "..", "data", "atrain")
         self.datagen_info = json.load(open(os.path.join(self.dataset_root, "dataset_generation_info.json")))
+
+        if self.use_hdf5:
+            h5_path = os.path.join(self.dataset_root, "atrain.h5")
+            assert os.path.exists(h5_path)
+            self.h5 = h5py.File(h5_path, "r")
+
         # read instance info file, make keys into integers
         self.instance_info = json.load(open(os.path.join(self.dataset_root, "instance_info.json")))
         self.instance_info = {int(k): v for k, v in self.instance_info.items()}
@@ -106,7 +117,22 @@ class ATrain(Dataset):
         """Get the item at the specified index."""
         inst_id = self.instance_ids[idx]
         inst = self.instance_info[inst_id]
-        parasol_arr = np.load(os.path.join(self.dataset_root, inst["input_path"]))
+
+        if self.use_hdf5:
+            parasol_arr = self.h5[str(inst_id)]["input"]
+            output_group = self.h5[str(inst_id)]["output"]
+            cs_group = output_group["cloud_scenario"]
+            output_dict = {"cloud_scenario": {}}
+            for k in output_group.keys():
+                if k == "cloud_scenario":
+                    continue
+                output_dict[k] = np.array(output_group[k])
+            for k in cs_group.keys():
+                output_dict["cloud_scenario"][k] = np.array(cs_group[k])
+        else:
+            parasol_arr = np.load(os.path.join(self.dataset_root, inst["input_path"]))
+            output_dict = pickle.load(open(os.path.join(self.dataset_root, inst["output_path"]), "rb"))
+
         input_arr = parasol_arr[:, :, self.multi_angle_idx]
         # clip the image channels between 0 and 1
         input_arr[:, :, self.img_channel_idx] = np.clip(input_arr[:, :, self.img_channel_idx], 0, 1)
@@ -119,7 +145,7 @@ class ATrain(Dataset):
             input_arr[:, :, self.sin_channel_idx] = np.sin(np.pi * input_arr[:, :, self.sin_channel_idx] / 180)
         # put channel dimension first
         input_arr = np.transpose(input_arr, (2, 0, 1))
-        output_dict = pickle.load(open(os.path.join(self.dataset_root, inst["output_path"]), "rb"))
+
         interp_corners, interp_weights = output_dict.pop("corner_idx"), output_dict.pop("corner_weights")
         cloud_scenario_flags = output_dict.pop("cloud_scenario")
         cloud_scenario = cloud_scenario_flags.pop("cloud_scenario")  # (p, 125)
@@ -297,10 +323,9 @@ def interp_atrain_output(batch: dict, out: torch.Tensor) -> torch.Tensor:
     # index to the 4 interp corners
     corner_idx = batch["input"]["interp"]["corners"]
     # keep the corners in bounds
-    corner_idx[corner_idx[:, :, 0] < 0] = 0  # too high
-    corner_idx[corner_idx[:, :, 0] >= patch_shape[0]] = patch_shape[0] - 1  # too low
-    corner_idx[corner_idx[:, :, 1] < 0] = 0  # too far left
-    corner_idx[corner_idx[:, :, 1] >= patch_shape[1]] = patch_shape[1] - 1  # too far right
+    corner_idx[:, :, 0] = torch.clamp(corner_idx[:, :, 0], 0, patch_shape[0] - 1)
+    corner_idx[:, :, 1] = torch.clamp(corner_idx[:, :, 1], 0, patch_shape[1] - 1)
+
     # get it as a flat index
     corner_idx = corner_idx[:, :, 0] * patch_shape[0] + corner_idx[:, :, 1]
     corner_idx = corner_idx.reshape(-1)
