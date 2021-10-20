@@ -130,24 +130,15 @@ def run_epoch(
     if args.no_data_aug:
         transforms = transforms[:1]  # if no aug, keep only the normalization
 
-    cls_weight = None
+    counts = None
     if not args.dont_weight_loss:
-        # effective sample number class weighting: https://arxiv.org/abs/1901.05555
-        tc = dloader.dataset.split["train_counts"]
-        cc = tc["cls_counts"]
-        if args.task == "bin_seg_2d":
-            percent_cloudy = tc["mask_count"] / tc["total_pixels"]
-            cc = [1 - percent_cloudy, percent_cloudy]
-        elif args.task == "bin_seg_3d":
-            cc = [cc[0], sum(cc[1:])]
-        total = sum(cc)
-        beta = (total - 1) / total
-        inv_E_n = [(1 - beta) / (1 - beta ** count) for count in cc]
-        cls_weight = [x / sum(inv_E_n) for x in inv_E_n]
-        cls_weight = torch.Tensor(cls_weight).cuda()
+        counts = dloader.dataset.split["train_counts"]
 
     objective = loss_factory[args.loss](
-        99 if args.task in ["seg_3d", "bin_seg_3d"] else 1, 9 if args.task == "seg_3d" else 2, weight=cls_weight
+        99 if args.task in ["seg_3d", "bin_seg_3d"] else 1,
+        9 if args.task == "seg_3d" else 2,
+        task=args.task,
+        counts=counts,
     )
     penalty = SmoothnessPenalty()
 

@@ -1,5 +1,4 @@
-"""Train a model on the A-Train dataset. This script is written to use SLURM and multiple GPUs. A simpler training
-script is a work in progress.
+"""Train a model on the A-Train dataset. This script is written to use SLURM and multiple GPUs.
 
 Some code borrowed from: https://github.com/erikwijmans/skynet-ddp-slurm-example
 """
@@ -7,6 +6,7 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -138,24 +138,15 @@ def run_epoch(
     if args.no_data_aug:
         transforms = transforms[:1]  # if no aug, keep only the normalization
 
-    cls_weight = None
+    counts = None
     if not args.dont_weight_loss:
-        # effective sample number class weighting: https://arxiv.org/abs/1901.05555
-        tc = dloader.dataset.split["train_counts"]
-        cc = tc["cls_counts"]
-        if args.task == "bin_seg_2d":
-            percent_cloudy = tc["mask_count"] / tc["total_pixels"]
-            cc = [1 - percent_cloudy, percent_cloudy]
-        elif args.task == "bin_seg_3d":
-            cc = [cc[0], sum(cc[1:])]
-        total = sum(cc)
-        beta = (total - 1) / total
-        inv_E_n = [(1 - beta) / (1 - beta ** count) for count in cc]
-        cls_weight = [x / sum(inv_E_n) for x in inv_E_n]
-        cls_weight = torch.Tensor(cls_weight).cuda()
+        counts = dloader.dataset.split["train_counts"]
 
     objective = loss_factory[args.loss](
-        99 if args.task in ["seg_3d", "bin_seg_3d"] else 1, 9 if args.task == "seg_3d" else 2, weight=cls_weight
+        99 if args.task in ["seg_3d", "bin_seg_3d"] else 1,
+        9 if args.task == "seg_3d" else 2,
+        task=args.task,
+        counts=counts,
     )
     penalty = SmoothnessPenalty()
 
@@ -227,33 +218,33 @@ def run_epoch(
             writer.add_scalar(f"{mode} loss", loss_total, epoch * len(dloader) + batch_idx + 1)
             writer.add_scalar(f"{mode} dice", mean_dice, epoch * len(dloader) + batch_idx + 1)
 
-            # if (batch_idx + 1) % viz_freq == 0:
-            #     batch_viz = []
-            #     for i in range(batch["instance_id"].shape[0]):
-            #         iid = batch["instance_id"][i]
-            #         gt_cloud_scenario = batch["output"]["cloud_scenario"][batch["input"]["interp"]["batch_idx"] == i]
-            #         viz = get_cloud_mask_viz(predictions[int(iid)], gt_cloud_scenario)
-            #         batch_viz.append(viz)
-            #     batch_viz = np.concatenate(batch_viz, axis=1)
-            #     viz_tag = f"cloud mask viz | epoch {epoch + 1} | {mode} batch {batch_idx + 1}"
-            #     writer.add_image(viz_tag, batch_viz, dataformats="HW")
+            if (batch_idx + 1) % viz_freq == 0:
+                batch_viz = []
+                for i in range(batch["instance_id"].shape[0]):
+                    iid = batch["instance_id"][i]
+                    gt_cloud_scenario = batch["output"]["cloud_scenario"][batch["input"]["interp"]["batch_idx"] == i]
+                    viz = get_cloud_mask_viz(predictions[int(iid)], gt_cloud_scenario)
+                    batch_viz.append(viz)
+                batch_viz = np.concatenate(batch_viz, axis=1)
+                viz_tag = f"cloud mask viz | epoch {epoch + 1} | {mode} batch {batch_idx + 1}"
+                writer.add_image(viz_tag, batch_viz, dataformats="HW")
 
         if EXIT.is_set():
             return
 
     distrib.all_reduce(stats)
+    distrib.barrier()
+    stats[0:2] /= stats[2]
+    if mode == "val":
+        scheduler.step(stats[1])
 
     if world_rank == 0:
-        stats[0:2] /= stats[2]
-
         elapsed_time = time.time() - epoch_start_time
         elapsed_time = str(datetime.timedelta(seconds=elapsed_time))
 
         tqdm.write(
             f"{mode.capitalize() + ':':6s} Avg Loss={stats[0].item():.3f}    Dice={stats[1].item():.3f}    Runtime={elapsed_time}"
         )
-        if mode == "val":
-            scheduler.step(stats[1])
 
     return predictions, stats
 
@@ -348,6 +339,12 @@ def main() -> None:
         writer = SummaryWriter(tensorboard_dir)
 
     fields = FIELD_DICT[args.fields]
+
+    seed = torch.zeros(1).long().cuda()
+    if world_rank == 0:
+        seed = torch.randint(low=0, high=(2 ** 63 - 1), size=(1,)).cuda()  # signed 64-bit randint
+    distrib.all_reduce(seed)
+
     atrain_train = ATrain("train", args.task, angles_to_omit=args.angles_to_omit, fields=fields, use_hdf5=False)
     atrain_val = ATrain("val", args.task, angles_to_omit=args.angles_to_omit, fields=fields, use_hdf5=False)
     train_loader = DataLoader(
@@ -357,7 +354,8 @@ def main() -> None:
             dataset=atrain_train,
             num_replicas=world_size,
             rank=world_rank,
-            seed=np.random.randint(2 ** 32),
+            seed=seed.item(),
+            drop_last=True,
         ),
         collate_fn=collate_atrain,
         drop_last=True,
@@ -367,7 +365,10 @@ def main() -> None:
         atrain_val,
         batch_size=args.batch_size,
         sampler=torch.utils.data.distributed.DistributedSampler(
-            dataset=atrain_val, num_replicas=world_size, rank=world_rank
+            dataset=atrain_val,
+            num_replicas=world_size,
+            rank=world_rank,
+            shuffle=False,
         ),
         collate_fn=collate_atrain,
         num_workers=args.num_workers,
@@ -404,16 +405,22 @@ def main() -> None:
             "val", model, optimizer, val_loader, writer, scheduler, profiler, epoch, args
         )
 
-        train_loader.sampler.set_epoch(epoch)
-
-        # TO DO: get evaluation to work with distributed
-        # if world_rank == 0:
-        #     val_metrics = atrain_val.evaluate(val_predictions)
-        #     if (epoch + 1) % args.eval_frequency == 0:
-        #         checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
+        if (epoch + 1) % args.eval_frequency == 0:
+            val_predictions_list = [None for _ in range(world_size)]
+            distrib.all_gather_object(val_predictions_list, val_predictions)
+            distrib.barrier()
+            if world_rank == 0:
+                val_predictions = val_predictions_list[0]
+                for i in range(1, world_size):
+                    val_predictions.update(val_predictions_list[i])
+                val_metrics = atrain_val.evaluate(val_predictions)
+                checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
 
         if EXIT.is_set():
             break
+
+        train_loader.sampler.set_epoch(epoch)
+        distrib.barrier()
 
 
 if __name__ == "__main__":

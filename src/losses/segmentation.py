@@ -8,16 +8,23 @@ import torch.nn.functional as F
 class BaseLoss(nn.Module):
     """Abstract base class for segmentation losses."""
 
-    def __init__(self, num_height_bins: int, num_classes: int) -> None:
+    def __init__(self, num_height_bins: int, num_classes: int, task: str, counts: dict = None) -> None:
         """Create a BaseLoss.
 
         Args:
             num_height_bins: Number of height bins.
             num_classes: Number of classes.
+            counts: The counts dictionary from the split object.
+            task: The task this loss is being used for.
         """
         super(BaseLoss, self).__init__()
         self.num_height_bins = num_height_bins
         self.num_classes = num_classes
+        self.task = task
+        if counts is None:
+            self.weight = torch.ones(self.num_classes).cuda()
+        else:
+            self.weight = self.get_class_weights(counts)
 
     def forward(self, predictions: torch.Tensor, batch: dict) -> torch.Tensor:
         raise NotImplementedError("BaseLoss is abstract, so forward() is unimplemented!")
@@ -56,6 +63,25 @@ class BaseLoss(nn.Module):
                     f"{i}, but got: {p_shp[i]} != {t_shp[i]}"
                 )
 
+    def set_class_weights(self, counts: dict) -> torch.Tensor:
+        """Get effective sample number class weighting. Based on: https://arxiv.org/abs/1901.05555
+
+        Args:
+            counts: The counts dictionary from the split object.
+        """
+        cc = counts["cls_counts"]
+        if self.task == "bin_seg_2d":
+            percent_cloudy = counts["mask_count"] / counts["total_pixels"]
+            cc = [1 - percent_cloudy, percent_cloudy]
+        elif self.task == "bin_seg_3d":
+            cc = [cc[0], sum(cc[1:])]
+        total = sum(cc)
+        beta = (total - 1) / total
+        inv_E_n = [(1 - beta) / (1 - beta ** count) for count in cc]
+        cls_weight = [x / sum(inv_E_n) for x in inv_E_n]
+        cls_weight = torch.Tensor(cls_weight).cuda()
+        self.weight = cls_weight
+
 
 class CrossEntropyLoss(BaseLoss):
     """This criterion combines LogSoftmax and NLLLoss in one single class. This implementation is specific to cloud
@@ -64,16 +90,16 @@ class CrossEntropyLoss(BaseLoss):
     For the math, see: https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html
     """
 
-    def __init__(self, num_height_bins: int, num_classes: int, weight: torch.Tensor = None) -> None:
+    def __init__(self, num_height_bins: int, num_classes: int, task: str, counts: dict = None) -> None:
         """Create a Cross Entropy Loss.
 
         Args:
             num_height_bins: Number of height bins.
             num_classes: Number of classes.
-            weight: Class weights.
+            counts: The counts dictionary from the split object.
+            task: The task this loss is being used for.
         """
-        super(CrossEntropyLoss, self).__init__(num_height_bins, num_classes)
-        self.weight = weight
+        super(CrossEntropyLoss, self).__init__(num_height_bins, num_classes, task=task, counts=counts)
 
     def forward(self, predictions: torch.Tensor, batch: dict) -> torch.Tensor:
         """Apply the loss to a set of predictions, with respect to a batch containing ground truth.
@@ -100,21 +126,27 @@ class FocalLoss(BaseLoss):
     """
 
     def __init__(
-        self, num_height_bins: int, num_classes: int, alpha: float = 0.5, gamma: float = 2, weight: torch.Tensor = None
+        self,
+        num_height_bins: int,
+        num_classes: int,
+        task: str,
+        counts: dict = None,
+        alpha: float = 0.5,
+        gamma: float = 2,
     ) -> None:
         """Create a Focal Loss.
 
         Args:
             num_height_bins: Number of height bins.
             num_classes: Number of classes.
+            counts: The counts dictionary from the split object.
+            task: The task this loss is being used for.
             alpha: Class balancing parameter.
             gamma: Focusing parameter.
-            weight: Class weights.
         """
-        super(FocalLoss, self).__init__(num_height_bins, num_classes)
+        super(FocalLoss, self).__init__(num_height_bins, num_classes, task=task, counts=counts)
         self.alpha = torch.tensor([alpha] + [(1 - alpha) / (self.num_classes - 1)] * (self.num_classes - 1)).cuda()
         self.gamma = gamma
-        self.weight = weight
 
     def forward(self, predictions: torch.Tensor, batch: dict) -> torch.Tensor:
         """Apply the loss to a set of predictions, with respect to a batch containing ground truth.
