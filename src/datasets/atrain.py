@@ -5,21 +5,16 @@ output is cloud scenario labels from the CALTRACK CLDCLASS product.
 import json
 import os
 import pickle
-import random
 import sys
-from collections import defaultdict
-from typing import Callable
 
 import h5py
 import numpy as np
 import torch
-import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset
 
 if "./src" not in sys.path:
     sys.path.insert(0, "./src")  # TO DO: change this once it's a package
 from datasets.metrics import get_metrics_func
-from datasets.normalization import ATRAIN_MEANS, ATRAIN_STDS
 
 
 class ATrain(Dataset):
@@ -166,7 +161,7 @@ class ATrain(Dataset):
             "output": {"cloud_scenario": cloud_scenario},
         }
 
-        if self.get_nondir:
+        if self.get_nondir and self.nondir_idx.shape[0] > 0:
             nondir_input = parasol_arr[:, :, self.nondir_idx]
             item["input"]["nondirectional_fields"] = {}
             for i in range(len(self.nondir_fields)):
@@ -346,80 +341,3 @@ def interp_atrain_output(batch: dict, out: torch.Tensor) -> torch.Tensor:
     # sum up the weighted corner values to get final interpolated values
     out_interp = torch.sum(out_corners_weighted, dim=1)
     return out_interp
-
-
-def get_norm_transform(img_channel_idx: list, multi_angle_idx: list) -> Callable:
-    """Normalization transform. Normalizes sensor input by the A-Train means and standard deviations.
-
-    Args:
-        img_channel_idx: Index to the image channels in the multi angle index.
-        multi_angle_idx: The multi angle index into the PARASOL fields.
-
-    Returns:
-        norm_transform: A function that normalizes a batch.
-    """
-    multi_angle_img_idx = multi_angle_idx[img_channel_idx]
-    means = ATRAIN_MEANS[multi_angle_img_idx]
-    stds = ATRAIN_STDS[multi_angle_img_idx]
-
-    def norm_transform(batch: dict) -> dict:
-        batch["input"]["sensor_input"][:, img_channel_idx] = TF.normalize(
-            batch["input"]["sensor_input"][:, img_channel_idx], means, stds
-        )
-        return batch
-
-    return norm_transform
-
-
-def random_hflip(batch: dict) -> dict:
-    """Random horizontal flip transform. Also flips the interpolation corners.
-
-    Args:
-        batch: A batch to transform.
-
-    Returns:
-        batch: The transformed batch.
-    """
-    if random.random() > 0.5:
-        batch["input"]["sensor_input"] = TF.hflip(batch["input"]["sensor_input"])
-        w = batch["input"]["sensor_input"].shape[-1]
-        corners_x = batch["input"]["interp"]["corners"][..., 0]
-        corners_x = w - corners_x - 1
-        batch["input"]["interp"]["corners"][..., 0] = corners_x
-    return batch
-
-
-def random_vflip(batch: dict) -> dict:
-    """Random vertical flip trnasform. Also flips the interpolation corners.
-
-    Args:
-        batch: A batch to transform.
-
-    Returns:
-        batch: The transformed batch.
-    """
-    if random.random() > 0.5:
-        batch["input"]["sensor_input"] = TF.vflip(batch["input"]["sensor_input"])
-        h = batch["input"]["sensor_input"].shape[-2]
-        corners_y = batch["input"]["interp"]["corners"][..., 1]
-        corners_y = h - corners_y - 1
-        batch["input"]["interp"]["corners"][..., 1] = corners_y
-    return batch
-
-
-def get_transforms(mode: str, img_channel_idx: list, multi_angle_idx: list) -> list:
-    """Get the list of transforms for either 'train' or 'val'.
-
-    Args:
-        mode: Specifies 'train' or 'val'.
-        img_channel_idx: Index to image features.
-        multi_angle_idx: Index to multi-angle features.
-
-    Returns:
-        transforms: The list of transform functions.
-    """
-    if mode == "train":
-        transforms = [get_norm_transform(img_channel_idx, multi_angle_idx), random_hflip, random_vflip]
-    elif mode == "val":
-        transforms = [get_norm_transform(img_channel_idx, multi_angle_idx)]
-    return transforms

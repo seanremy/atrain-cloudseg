@@ -2,14 +2,9 @@
 
 import getpass
 import os
-import re
 import shutil
-import time
 from datetime import datetime
 from ftplib import FTP, error_perm, error_temp
-
-import h5py
-from pyhdf.SD import SD, SDC
 
 
 def datetime_to_subpath(dt: datetime) -> str:
@@ -96,8 +91,6 @@ class ICARESession:
 
     def cleanup(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-        # while os.path.exists(self.temp_dir):
-        #     time.sleep(0.1)
 
     def listdir(self, dir_path: str) -> list:
         """List the contents of a directory.

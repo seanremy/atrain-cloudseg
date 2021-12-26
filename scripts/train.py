@@ -1,15 +1,17 @@
-"""Train a model on the A-Train dataset. This script uses a single GPU only."""
+"""Train a model on the A-Train dataset."""
 import argparse
 import datetime
 import json
 import os
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from contextlib import nullcontext
 
 import numpy as np
 import torch
+import torch.distributed as distrib
 from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -17,12 +19,16 @@ from tqdm import tqdm
 
 if "./src" not in sys.path:
     sys.path.insert(0, "./src")  # TO DO: change this once it's a package
-from datasets.atrain import ATrain, collate_atrain, get_transforms, interp_atrain_output
+from datasets.atrain import ATrain, collate_atrain
+from datasets.transforms import get_transforms
 from losses.factory import loss_factory
 from losses.segmentation import SmoothnessPenalty
 from models.factory import model_factory
 from utils.parasol_fields import FIELD_DICT
 from utils.plotting import get_cloud_mask_viz
+
+# Some SLURM and DDP code borrowed from: https://github.com/erikwijmans/skynet-ddp-slurm-example
+from utils.slurm import init_distrib_slurm
 
 EXIT = threading.Event()
 EXIT.clear()
@@ -39,9 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--arch", type=str, default="unet_2d", help="Which model architecture to use.")
     parser.add_argument("--base-depth", type=int, default=64, help="Base depth for the U-Net model.")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size to use for training and validation.")
-    # parser.add_argument("--debug", action="store_true", help="Debug mode.")
     parser.add_argument("--dont-weight-loss", action="store_true", help="Don't class-weight the loss function.")
-    parser.add_argument("--eval-frequency", type=int, default=1, help="How often (in epochs) to evaluate.")
+    parser.add_argument("--eval-frequency", type=int, default=1, help="How often (in epochs) to evaluate & checkpoint.")
     parser.add_argument("--exp-name", type=str, required=True, help="Name of the experiment.")
     parser.add_argument("--fields", type=str, default="directional", help="Which fields to use as input.")
     parser.add_argument("--learning-rate", type=float, default=1e-3, help="Starting learning rate.")
@@ -52,8 +57,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=6, help="Number of workers.")
     parser.add_argument("--profile", action="store_true", help="Whether or not to use the pytorch profiler.")
     parser.add_argument("--save-frequency", type=int, default=5, help="How often (in epochs) to checkpoint the model.")
+    slurm_help = "Whether SLURM is being used for this job. If you don't know what SLURM is, ignore this option."
+    parser.add_argument("--slurm", action="store_true", help=slurm_help)
     parser.add_argument("--smoothness", type=float, default=0, help="Weight for the smoothness penalty.")
     parser.add_argument("--task", type=str, default="bin_seg_3d", help="Which task to perform.")
+    viz_help = "How often (in epochs) to show the cloud cross-section viz in tensorboard."
+    parser.add_argument("--viz-frequency", type=int, default=20, help=viz_help)
     args = parser.parse_args()
     args.angles_to_omit = args.angles_to_omit.split(",")
     args.angles_to_omit = [int(a) for a in args.angles_to_omit if a != ""]
@@ -69,6 +78,7 @@ def parse_args() -> argparse.Namespace:
     assert args.num_blocks < 0 or args.arch.startswith("unet")
     assert args.num_epochs > 0
     assert args.task in ["seg_3d", "bin_seg_3d", "bin_seg_2d"]
+    assert args.viz_frequency > 0
     return args
 
 
@@ -119,6 +129,8 @@ def run_epoch(
     """
     assert mode in ["train", "val"]
 
+    epoch_start_time = time.time()
+
     if mode == "train":
         model.train()
     else:
@@ -143,11 +155,10 @@ def run_epoch(
     penalty = SmoothnessPenalty()
 
     stats = torch.zeros((3,), device=device)
-    pbar = tqdm(dloader)
+    world_rank = 0 if not args.slurm else distrib.get_rank()
     predictions = {}
     batch_idx = -1
-    viz_freq = 50
-    for batch in pbar:
+    for batch in dloader:
         batch_idx += 1
 
         batch = dict_to(batch, device)
@@ -158,13 +169,10 @@ def run_epoch(
             batch["output"]["cloud_scenario"] = batch["output"]["cloud_scenario"].any(dim=1, keepdim=True)
         elif args.task == "bin_seg_3d":
             batch["output"]["cloud_scenario"] = batch["output"]["cloud_scenario"] > 0
-
-        x = batch["input"]["sensor_input"]
         y = batch["output"]["cloud_scenario"]
 
         with context:
-            out = model(x)
-            out_interp = interp_atrain_output(batch, out)
+            out, out_interp = model(batch)
             if args.task in ["bin_seg_2d", "bin_seg_3d"]:
                 pred_classes = out_interp > 0.5  # since our objective is based on (1 - mask, mask)
                 out_interp = torch.stack([1 - out_interp, out_interp], dim=2)
@@ -179,7 +187,7 @@ def run_epoch(
             optimizer.zero_grad()
             loss_total.backward()
             optimizer.step()
-        if args.profile:
+        if args.profile and world_rank == 0:
             profiler.step()
 
         cls_dice_scores = []  # store per-class dice score
@@ -205,34 +213,39 @@ def run_epoch(
         for i in range(batch["instance_id"].shape[0]):
             predictions[int(batch["instance_id"][i])] = pred_classes[batch["input"]["interp"]["batch_idx"] == i]
 
-        desc_list = [
-            f"Avg {mode.capitalize()} Loss={stats[0] / stats[2]:.3f}",
-            f"Mean {mode.capitalize()} Dice={stats[1] / stats[2]:.3f}",
-        ]
-        pbar.set_description("  |  ".join(desc_list))
+        if world_rank == 0:
 
-        writer.add_scalar(f"{mode} loss", loss_total, epoch * len(dloader) + batch_idx + 1)
-        writer.add_scalar(f"{mode} dice", mean_dice, epoch * len(dloader) + batch_idx + 1)
+            writer.add_scalar(f"{mode} loss", loss_total / y.size(0), epoch * len(dloader) + batch_idx + 1)
+            writer.add_scalar(f"{mode} dice", mean_dice, epoch * len(dloader) + batch_idx + 1)
 
-        if (batch_idx + 1) % viz_freq == 0:
-            batch_viz = []
-            for i in range(batch["instance_id"].shape[0]):
-                iid = batch["instance_id"][i]
-                gt_cloud_scenario = batch["output"]["cloud_scenario"][batch["input"]["interp"]["batch_idx"] == i]
-                viz = get_cloud_mask_viz(predictions[int(iid)], gt_cloud_scenario)
-                batch_viz.append(viz)
-            batch_viz = np.concatenate(batch_viz, axis=1)
-            viz_tag = f"cloud mask viz | epoch {epoch + 1} | {mode} batch {batch_idx + 1}"
-            writer.add_image(viz_tag, batch_viz, dataformats="HW")
+            if (batch_idx + 1) % args.viz_frequency == 0:
+                batch_viz = []
+                for i in range(batch["instance_id"].shape[0]):
+                    iid = batch["instance_id"][i]
+                    gt_cloud_scenario = batch["output"]["cloud_scenario"][batch["input"]["interp"]["batch_idx"] == i]
+                    viz = get_cloud_mask_viz(predictions[int(iid)], gt_cloud_scenario)
+                    batch_viz.append(viz)
+                batch_viz = np.concatenate(batch_viz, axis=1)
+                viz_tag = f"cloud mask viz | epoch {epoch + 1} | {mode} batch {batch_idx + 1}"
+                writer.add_image(viz_tag, batch_viz, dataformats="HW")
 
         if EXIT.is_set():
             return
 
+    if args.slurm:
+        distrib.all_reduce(stats)
+        distrib.barrier()
     stats[0:2] /= stats[2]
-
-    tqdm.write(f"{mode.capitalize()}: Avg Loss={stats[0].item():.3f}    Dice={stats[1].item():.3f}")
     if mode == "val":
         scheduler.step(stats[1])
+
+    if world_rank == 0:
+        elapsed_time = time.time() - epoch_start_time
+        elapsed_time = str(datetime.timedelta(seconds=elapsed_time))
+
+        tqdm.write(
+            f"{mode.capitalize() + ':':6s} Avg Loss={stats[0].item():.3f}    Dice={stats[1].item():.3f}    Runtime={elapsed_time}"
+        )
 
     return predictions, stats
 
@@ -246,6 +259,7 @@ def make_exp_dir(args: argparse.Namespace) -> None:
     exp_dir = os.path.join("experiments", args.exp_name)
     if not os.path.exists(exp_dir):
         os.makedirs(exp_dir)
+    if not os.path.exists(os.path.join(exp_dir, "args.json")):
         json.dump(vars(args), open(os.path.join(exp_dir, "args.json"), "w"))
     os.makedirs(os.path.join("data", "checkpoints", args.exp_name), exist_ok=True)
 
@@ -301,29 +315,67 @@ def checkpoint(
 def main() -> None:
     args = parse_args()
 
-    device = torch.device("cuda")
+    if args.slurm:
+        # local_rank, _ = init_distrib_slurm(backend="gloo")  # use for debugging on CPU
+        local_rank, _ = init_distrib_slurm()
+        world_rank = distrib.get_rank()
+        world_size = distrib.get_world_size()
+        device = torch.device("cuda", local_rank)
+        torch.cuda.set_device(device)
+        distrib.barrier()
+    else:
+        world_rank = 0
+        device = torch.device("cuda")
+        torch.cuda.set_device(device)
+
     profiler = None
     writer = None
     now_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     tensorboard_dir = os.path.join("data", "tensorboard", f"{args.exp_name}_{now_str}")
-    make_exp_dir(args)
-    os.makedirs(tensorboard_dir)
-    if args.profile:
-        profiler = torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=2, warmup=2, active=6, repeat=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(tensorboard_dir),
-            record_shapes=True,
-            with_stack=True,
-        )
-    writer = SummaryWriter(tensorboard_dir)
+    # only rank 0 is responsible for making directories, profiling, and tensorboard
+    if not args.slurm or world_rank == 0:
+        make_exp_dir(args)
+        os.makedirs(tensorboard_dir)
+        if args.profile:
+            profiler = torch.profiler.profile(
+                schedule=torch.profiler.schedule(wait=2, warmup=2, active=6, repeat=1),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(tensorboard_dir),
+                record_shapes=True,
+                with_stack=True,
+            )
+        writer = SummaryWriter(tensorboard_dir)
 
     fields = FIELD_DICT[args.fields]
-    atrain_train = ATrain("train", args.task, angles_to_omit=args.angles_to_omit, fields=fields)
-    atrain_val = ATrain("val", args.task, angles_to_omit=args.angles_to_omit, fields=fields)
+
+    atrain_train = ATrain("train", args.task, angles_to_omit=args.angles_to_omit, fields=fields, use_hdf5=False)
+    atrain_val = ATrain("val", args.task, angles_to_omit=args.angles_to_omit, fields=fields, use_hdf5=False)
+    if args.slurm:
+        seed = torch.zeros(1).long().cuda()
+        if world_rank == 0:
+            seed = torch.randint(low=0, high=(2 ** 63 - 1), size=(1,)).cuda()  # signed 64-bit randint
+        distrib.all_reduce(seed)
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset=atrain_train,
+            num_replicas=world_size,
+            rank=world_rank,
+            seed=seed.item(),
+            drop_last=True,
+        )
+        val_sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset=atrain_val,
+            num_replicas=world_size,
+            rank=world_rank,
+            shuffle=False,
+        )
+        shuffle_train = False
+    else:
+        train_sampler, val_sampler = None, None
+        shuffle_train = True
     train_loader = DataLoader(
         atrain_train,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=shuffle_train,
+        sampler=train_sampler,
         collate_fn=collate_atrain,
         drop_last=True,
         num_workers=args.num_workers,
@@ -331,7 +383,7 @@ def main() -> None:
     val_loader = DataLoader(
         atrain_val,
         batch_size=args.batch_size,
-        shuffle=False,
+        sampler=val_sampler,
         collate_fn=collate_atrain,
         num_workers=args.num_workers,
     )
@@ -348,25 +400,44 @@ def main() -> None:
     model = model_factory[args.arch](in_channels, out_channels, patch_size, args)
 
     model = model.to(device)
+    if args.slurm:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[device],
+            output_device=device,
+        )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", threshold=1e-3, eps=1e-12)
 
     for epoch in range(args.num_epochs):
         lr = optimizer.state_dict()["param_groups"][0]["lr"]
-        tqdm.write(f"\n\n===== Epoch {epoch+1:3d}/{args.num_epochs:3d} =====")
-        tqdm.write(f"learning rate: {lr:.2e}\n")
+        if world_rank == 0:
+            tqdm.write(f"\n\n===== Epoch {epoch+1:3d}/{args.num_epochs:3d} =====")
+            tqdm.write(f"learning rate: {lr:.2e}\n")
 
         _, train_stats = run_epoch("train", model, optimizer, train_loader, writer, scheduler, profiler, epoch, args)
         val_predictions, val_stats = run_epoch(
             "val", model, optimizer, val_loader, writer, scheduler, profiler, epoch, args
         )
 
-        val_metrics = atrain_val.evaluate(val_predictions)
-
-        checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
+        if (epoch + 1) % args.eval_frequency == 0:
+            if args.slurm:
+                val_predictions_list = [None for _ in range(world_size)]
+                distrib.all_gather_object(val_predictions_list, val_predictions)
+                if world_rank == 0:
+                    val_predictions = val_predictions_list[0]
+                    for i in range(1, world_size):
+                        val_predictions.update(val_predictions_list[i])
+            if world_rank == 0:
+                val_metrics = atrain_val.evaluate(val_predictions)
+                checkpoint(model, args, optimizer, epoch, {"train": train_stats, "val": val_stats}, val_metrics)
 
         if EXIT.is_set():
             break
+
+        if args.slurm:
+            train_loader.sampler.set_epoch(epoch)
+            distrib.barrier()
 
 
 if __name__ == "__main__":

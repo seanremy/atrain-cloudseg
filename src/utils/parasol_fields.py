@@ -1,7 +1,9 @@
 """Standard lists of fields to get from PARASOL files."""
 
+FIELD_DICT = {}
+
 # All available fields
-_ALL = [
+FIELD_DICT["all"] = [
     ("Data_Directional_Fields", "I443NP"),  # normalized radiance for channel 443NP
     ("Data_Directional_Fields", "I490P"),  # normalized radiance for channel 490P
     ("Data_Directional_Fields", "Q490P"),  # second component of Stokes Vector (Q) for channel 490P
@@ -58,7 +60,7 @@ _ALL = [
 ]
 
 # The default set, which contains all of the wavelengths, but leaves out quality flags and phi
-_DEFAULT = [
+FIELD_DICT["default"] = [
     ("Data_Directional_Fields", "I443NP"),
     ("Data_Directional_Fields", "I490P"),
     ("Data_Directional_Fields", "Q490P"),
@@ -86,7 +88,7 @@ _DEFAULT = [
 ]
 
 # all directional fields
-_DIRECTIONAL = [
+FIELD_DICT["directional"] = [
     ("Data_Directional_Fields", "I443NP"),
     ("Data_Directional_Fields", "I490P"),
     ("Data_Directional_Fields", "Q490P"),
@@ -108,7 +110,7 @@ _DIRECTIONAL = [
 ]
 
 # The minimal set of fields to use for debugging
-_MINIMAL = [
+FIELD_DICT["minimal"] = [
     ("Data_Directional_Fields", "I865P"),
     ("Data_Fields", "Nviews"),
     ("Data_Fields", "cloud_indicator"),
@@ -132,13 +134,6 @@ _GEOM_FIELDS = [
     ("Data_Directional_Fields", "thetas"),
     ("Data_Directional_Fields", "thetav"),
 ]
-
-FIELD_DICT = {
-    "all": _ALL,
-    "default": _DEFAULT,
-    "directional": _DIRECTIONAL,
-    "minimal": _MINIMAL,
-}
 
 # single-band fields, with and without polarization
 for band_wl, band_fields in _BANDS.items():

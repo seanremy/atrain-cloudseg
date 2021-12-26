@@ -1,10 +1,16 @@
+import sys
+
 import torch
 import torch.nn as nn
+
+if "./src" not in sys.path:
+    sys.path.insert(0, "./src")  # TO DO: change this once it's a package
+from datasets.atrain import interp_atrain_output
 
 
 class SinglePixel(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, num_layers: int = 3, mid_layer_depth: int = None) -> None:
-        """Create a Single Pixel model.
+        """Create a SinglePixel.
 
         Args:
             in_channels: Number of input channels.
@@ -33,5 +39,8 @@ class SinglePixel(nn.Module):
         self.layers.append(nn.Conv2d(self.mid_layer_depth, self.out_channels, kernel_size=1))
         self.layers = nn.Sequential(*self.layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+    def forward(self, batch: dict) -> torch.Tensor:
+        x = batch["input"]["sensor_input"]
+        out = self.layers(x)
+        out_interp = interp_atrain_output(batch, out)
+        return out, out_interp

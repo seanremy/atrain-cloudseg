@@ -5,10 +5,16 @@ Some code based on the following:
 - github.com/proceduralia/pytorch-conv2_1d/blob/master/conv2_1d.py
 """
 
+import sys
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+if "./src" not in sys.path:
+    sys.path.insert(0, "./src")  # TO DO: change this once it's a package
+from datasets.atrain import interp_atrain_output
 
 
 class Down(nn.Module):
@@ -220,7 +226,7 @@ class UNet(nn.Module):
         num_blocks: int = 4,
         net_type: str = "2d",
     ) -> None:
-        """Create a U-Net.
+        """Create a UNet.
 
         Args:
             in_channels: The number of input channels.
@@ -255,7 +261,8 @@ class UNet(nn.Module):
         self.down_blocks = nn.Sequential(*self.down_blocks)
         self.up_blocks = []
         if self.net_type in ["2_1d", "3d"]:
-            self.up_alt_scales = [self.out_channels // (2 ** i) for i in range(1, self.num_blocks + 1)][::-1]
+            # self.up_alt_scales = [self.out_channels // (2 ** i) for i in range(1, self.num_blocks + 1)][::-1]
+            self.up_alt_scales = [self.base_depth // (2 ** i) for i in range(1, self.num_blocks + 1)][::-1]
         for i in range(self.num_blocks, 0, -1):
             if self.net_type in ["2d", "2dT"]:
                 use_conv_transpose = self.net_type == "2dT"
@@ -270,11 +277,15 @@ class UNet(nn.Module):
         self.up_blocks = nn.Sequential(*self.up_blocks)
 
         if self.net_type in ["2d", "2dT"]:
-            self.post_conv = nn.Conv2d(self.base_depth, out_channels, kernel_size=1)
+            # self.post_conv = nn.Conv2d(self.base_depth, out_channels, kernel_size=1)
+            self.post_conv = nn.Conv2d(self.base_depth, self.base_depth, kernel_size=1)
         elif self.net_type in ["2_1d", "3d"]:
             self.post_conv = nn.Conv3d(self.base_depth // 2, 1, kernel_size=1)
+        self.fc1 = nn.Linear(self.base_depth, self.base_depth)
+        self.fc2 = nn.Linear(self.base_depth, out_channels)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, batch: dict) -> torch.Tensor:
+        x = batch["input"]["sensor_input"]
         x_down = [F.relu(self.pre_conv_a(x))]
         x_skip = F.relu(self.pre_conv_b(x))
         for db in self.down_blocks:
@@ -306,4 +317,7 @@ class UNet(nn.Module):
             x = torch.cat([x_up, x_skip], dim=2)
             x = self.post_conv(x)
             x = x.squeeze(1)
-        return x
+        x_int = interp_atrain_output(batch, x)
+        x_int = F.relu(self.fc1(x_int))
+        x_int = self.fc2(x_int)
+        return x, x_int
