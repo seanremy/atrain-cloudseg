@@ -17,7 +17,6 @@ from datetime import datetime, timedelta
 import geopy.distance
 import numpy as np
 from scipy.spatial import KDTree
-from torch._C import ParameterDict
 from tqdm import tqdm
 
 if "./src" not in sys.path:
@@ -35,49 +34,57 @@ def parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--atrain_dir", type=str, required=True, help="Path to the directory where you want to make the dataset."
+        "--atrain-dir", type=str, required=True, help="Path to the directory where you want to make the dataset."
     )
     parser.add_argument(
-        "--temp_dir", type=str, required=True, help="Path to the temporary directory for the ICARE FTP cache."
+        "--temp-dir", type=str, required=True, help="Path to the temporary directory for the ICARE FTP cache."
     )
     parser.add_argument("--resume", action="store_true", help="Resume from where script left off.")
     parser.add_argument(
-        "--time_match_threshold",
+        "--time-match-threshold",
         type=int,
         default=600,
         help="Maximum acceptable time offset (in seconds) between POLDER and CALIOP beginning of acquisition.",
     )
     parser.add_argument(
-        "--days_per_month",
+        "--days-per-month",
         type=int,
         default=1000,
         help="Number of days to process per month. Default is arbitrarily high at 1000.",
     )
     parser.add_argument(
-        "--files_per_day",
+        "--files-per-day",
         type=int,
         default=1000,
         help="Number of files to process per day. There are usually 14-15 files. Default is arbitrarily high at 1000.",
     )
     parser.add_argument(
-        "--samples_per_file", type=int, default=16, help="Goal number of samples to take per orbit file."
+        "--samples-per-file", type=int, default=16, help="Goal number of samples to take per orbit file."
     )
     parser.add_argument(
-        "--patch_size",
+        "--patch-size",
         type=int,
         default=100,
         help="Patch size, in pixels, of samples to take. Raising this number has a severe effect on "
         "the size of the dataset on disk.",
     )
     parser.add_argument(
-        "--min_parasol_views",
+        "--min-labels-per-patch",
+        type=int,
+        default=50,
+        help="Minimum number of labeled locations per patch for it to be considered valid. Lowering this number may "
+        "produce patches with very few labels, raising it may strongly bias label locations toward the central N/S "
+        "line in each patch.",
+    )
+    parser.add_argument(
+        "--min-parasol-views",
         type=int,
         default=13,
         help="Minimum number of angles that need to be available for every pixel in a patch for it to be considered "
         "valid. Raising this number may cause strange sampling artifacts, and lowering it may reduce data quality.",
     )
     parser.add_argument(
-        "--field_scheme",
+        "--field-scheme",
         type=str,
         default="default",
         help="Which scheme of PARASOL fields to use. Fields can be found in 'utils/parasol_fields.py'",
@@ -97,13 +104,25 @@ def parse_args() -> argparse.Namespace:
             f"Patch size of {args.patch_size} is quite large. Remember that 'images' will have 240 channels. You may "
             "notice significant disk usage as a result."
         )
-    # assert args.nadir_padding >= 0 and args.nadir_padding < args.patch_size // 2
+    assert args.min_labels_per_patch >= 0
+    if args.min_labels_per_patch < args.patch_size / 3:
+        warnings.warn(
+            f"Min labels per patch of {args.min_labels_per_patch} is quite low, this may result in patches "
+            "with very few labels."
+        )
+    if args.min_labels_per_patch > args.patch_size:
+        warnings.warn(
+            f"Requiring more labels per patch than the patch size may result in label locations strongly biasing "
+            "towards the center of your patches."
+        )
     assert args.min_parasol_views > 0 and args.min_parasol_views <= 16
     # assert args.field_scheme.lower() in FIELD_DICT
     return args
 
 
-def get_patches(par_scene: PARASOLScene, cc_scene: CLDCLASSScene, patch_size: int, patches_per_scene: int) -> list:
+def get_patches(
+    par_scene: PARASOLScene, cc_scene: CLDCLASSScene, patch_size: int, patches_per_scene: int, min_labels_per_patch: int
+) -> list:
     """Get a list of patches for the provided scene pair.
 
     Args:
@@ -111,6 +130,7 @@ def get_patches(par_scene: PARASOLScene, cc_scene: CLDCLASSScene, patch_size: in
         cc_scene: The 2B-CLDCLASS scene.
         patch_size: The size (height & width) of the square patches to sample from the scenes.
         patches_per_scene: How many patches to get in this pair of scenes.
+        min_labels_per_patch: Minimum number of labeled locations per patch.
     """
 
     # pre-compute POLDER grid stuff for later
@@ -180,9 +200,9 @@ def get_patches(par_scene: PARASOLScene, cc_scene: CLDCLASSScene, patch_size: in
     enclosed_center_idx = np.floor(enclosed_lat_ranges.mean(axis=1)).astype(int)
     patch_centers_latlon = np.stack([cc_scene.lat[enclosed_center_idx], cc_scene.lon[enclosed_center_idx]], axis=1)
 
-    # randomly shift patches a little east or west so that labels aren't always in the middle
+    # randomly shift patches east or west so that labels aren't always in the middle
     lon_ranges_by_patch_center = patch_size * (180 / (3240 * np.cos(patch_centers_latlon[:, 0] * np.pi / 180)))
-    lon_offsets = (np.random.random(patch_centers_latlon.shape[0]) - 0.5) * lon_ranges_by_patch_center / 4
+    lon_offsets = (np.random.random(patch_centers_latlon.shape[0]) - 0.5) * lon_ranges_by_patch_center
     patch_centers_latlon[:, 1] += lon_offsets
 
     # get patches
@@ -218,7 +238,7 @@ def get_patches(par_scene: PARASOLScene, cc_scene: CLDCLASSScene, patch_size: in
         patch_mask_cc[np.arange(patch_lat_range[0], patch_lat_range[1])[corners_in_patch]] = True
 
         # only keep this patch if it's the right size and we have enough labeled pixels:
-        patch_good = (patch_mask_par.sum() == (patch_size ** 2)) and patch_mask_cc.sum() >= patch_size
+        patch_good = (patch_mask_par.sum() == (patch_size ** 2)) and patch_mask_cc.sum() >= min_labels_per_patch
         if patch_good:
             patch_pg_row = np.reshape(pg_row[patch_mask_par], (patch_size, patch_size))
             patch_pg_col = np.reshape(pg_col[patch_mask_par], (patch_size, patch_size))
@@ -395,7 +415,9 @@ def main() -> None:
             par_scene = PARASOLScene(local_par_filepath, par_fields, min_views=args.min_parasol_views)
 
             # sample patches from the scene
-            patches = get_patches(par_scene, cc_scene, args.patch_size, args.samples_per_file)
+            patches = get_patches(
+                par_scene, cc_scene, args.patch_size, args.samples_per_file, args.min_labels_per_patch
+            )
             for patch in patches:
 
                 # get patch array and labels
